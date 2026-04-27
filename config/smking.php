@@ -18,10 +18,12 @@ return [
     | Base URL
     |--------------------------------------------------------------------------
     |
-    | The smking API origin. Only change this for self-hosted deployments.
+    | The smking API origin. Required — set SMKING_BASE_URL in your .env so
+    | the package knows where to send API requests. There is no hardcoded
+    | default; the middleware fails open (does not inject) when this is empty.
     |
     */
-    'base_url' => env('SMKING_BASE_URL', 'https://app.smking.io'),
+    'base_url' => env('SMKING_BASE_URL'),
 
     /*
     |--------------------------------------------------------------------------

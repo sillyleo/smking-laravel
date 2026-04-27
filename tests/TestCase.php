@@ -20,7 +20,7 @@ abstract class TestCase extends Orchestra
     protected function defineEnvironment($app): void
     {
         $app['config']->set('smking.api_key', 'pk_test_key');
-        $app['config']->set('smking.base_url', 'https://app.smking.io');
+        $app['config']->set('smking.base_url', 'https://api.test');
         $app['config']->set('smking.cache.enabled', false);
     }
 }

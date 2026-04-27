@@ -4,15 +4,14 @@
     "keywords": ["laravel", "seo", "aeo", "ai", "json-ld", "schema", "chatgpt", "perplexity", "smking"],
     "type": "library",
     "license": "MIT",
-    "homepage": "https://smking.io",
+    "homepage": "https://github.com/sillyleo/smking-laravel",
     "support": {
         "issues": "https://github.com/sillyleo/smking/issues",
         "source": "https://github.com/sillyleo/smking"
     },
     "authors": [
         {
-            "name": "smking",
-            "homepage": "https://smking.io"
+            "name": "smking"
         }
     ],
     "require": {

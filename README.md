@@ -14,11 +14,14 @@ Publish the config:
 php artisan vendor:publish --tag=smking-config
 ```
 
-Set your key:
+Configure your `.env`:
 
 ```dotenv
 SMKING_API_KEY=pk_...
+SMKING_BASE_URL=https://your-smking-instance.example
 ```
+
+Both values are required. `SMKING_BASE_URL` must point at your smking deployment — the package ships with no default so it never silently talks to the wrong host.
 
 That's it — the middleware auto-registers. Every HTML GET response now picks up:
 
@@ -64,7 +67,7 @@ The `<x-smking-meta />` component mirrors `getSmkingMetadata()` from `@smking/ne
 | Key | Default | Notes |
 |-----|---------|-------|
 | `api_key` | `env('SMKING_API_KEY')` | Publishable key from the dashboard |
-| `base_url` | `https://app.smking.io` | Override for self-hosted |
+| `base_url` | _(required, no default)_ | Set `SMKING_BASE_URL` to your smking deployment origin |
 | `auto_inject` | `true` | Register middleware globally |
 | `only` / `except` | see file | Path filters (Laravel wildcard) |
 | `inject.*` | all `true` | Toggle json_ld / meta_description / faq / summary / seo_title / og_title / og_description / og_image / canonical |
