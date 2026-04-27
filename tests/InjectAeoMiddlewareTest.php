@@ -242,6 +242,28 @@ class InjectAeoMiddlewareTest extends TestCase
         $this->assertSame('/products/new', $response->headers->get('X-Smking-Path'));
     }
 
+    public function test_emits_headers_on_head_request(): void
+    {
+        // `curl -I` (HEAD) is the canonical install-verification command,
+        // and HEAD must surface the same X-Smking-* headers as GET.
+        config()->set('smking.debug', false);
+
+        Http::fake([
+            '*' => Http::response(['status' => 'ready', 'jsonLd' => ['@type' => 'Product']], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'HEAD');
+        $response = $middleware->handle($request, function () {
+            // Symfony Response strips the body on HEAD; simulate that.
+            return new Response('', 200, ['Content-Type' => 'text/html']);
+        });
+
+        $this->assertSame('ready', $response->headers->get('X-Smking-Status'));
+        $this->assertSame('/products/widget', $response->headers->get('X-Smking-Path'));
+    }
+
     public function test_emits_pending_status_header(): void
     {
         config()->set('smking.debug', false);
