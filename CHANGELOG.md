@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.2.3
+
+Full audit of v0.2.2 surfaced four critical issues and several smaller ones. This release fixes them in one batch.
+
+### Critical fixes
+
+- **Doctor's "config/smking.php published" check stops being a false ❌.** The service provider already loads defaults via `mergeConfigFrom`, so publishing is optional. v0.2.2 reported ❌ when the file was absent and exited 1, telling customers their install was broken when it wasn't. Now an `info` row.
+- **Doctor's "API reachable" check actually checks reachability now.** v0.2.2 sent GET to `base_url` root and called any `<500` response a pass — typo'd domains, `https://google.com`, or 404 landing pages all passed. v0.2.3 sends POST to `{base_url}/api/v1/public/aeo` with an empty body and expects 400/401/422 (real validation rejection from the smking handler). 404 / 5xx / unexpected 2xx now fail with a precise reason.
+- **`Content-Encoding: gzip` responses no longer get rewritten.** Customers running PHP `output_compression` or webserver-level gzip middleware previously had their gzipped HTML body mangled by `preg_replace`/`setContent` — corrupted pages downstream. Middleware now emits headers and returns when any `Content-Encoding` is set.
+- **Cache key namespace now includes `(api_key, base_url)`.** Rotating the publishable key or switching `SMKING_BASE_URL` between staging and production used to leave stale `not_found` / `ready` entries in cache for up to an hour. v0.2.3 derives a 12-char SHA-256 namespace from those two values, so rotation invalidates automatically.
+
+### Important fixes
+
+- **`Content-Disposition: attachment` HTML downloads are skipped.** AEO content was being injected into HTML files customers were exporting for download.
+- **`not_found` cache TTL is short by default (30s, configurable via `SMKING_NOT_FOUND_TTL`).** Long not_found cache used to mask the moment backend audit transitioned to ready, leaving customers waiting up to a full hour for content to surface.
+- **Doctor's default `--path` is now `__smking-doctor`** instead of `/`, so running doctor doesn't register a meaningless `/` path in the backend audit queue.
+- **Doctor drops the "ServiceProvider registered" check.** It was always ✅ — the doctor command can only run if the provider already loaded — so it added nothing.
+- **Default `except` patterns expanded.** Added `v1/*`, `v2/*`, `graphql`, `webhooks/*`, `oauth/*`, `up` (Laravel 11 health), `health`, `healthz`, `ping`, `_debugbar*`, `nova*`, `filament*` so middleware doesn't waste API calls on routes that obviously aren't HTML pages.
+
+### Tests added
+
+- HEAD method + `auto_inject=false` (gap that let v0.2.0 → v0.2.2's HEAD bug slip)
+- `Content-Encoding: gzip` response stays untouched
+- `Content-Disposition: attachment` skipped entirely
+- Cache isolation across `api_key` rotation and `base_url` switch
+- `not_found` cache hits a second call but new HTTP fires after eviction
+- Doctor's `config not published` returns 0 (no longer a hard fail)
+- Doctor's `API endpoint 404` returns 1 (caught the v0.2.2 false-pass case)
+
 ## v0.2.2
 
 ### Fixed

@@ -13,7 +13,6 @@ use Smking\Laravel\AeoClient;
 use ReflectionClass;
 use ReflectionException;
 use Smking\Laravel\Http\Middleware\InjectAeo;
-use Smking\Laravel\SmkingServiceProvider;
 use Throwable;
 
 /**
@@ -27,14 +26,13 @@ use Throwable;
  */
 class DoctorCommand extends Command
 {
-    protected $signature = 'smking:doctor {--path=/ : Path to probe AEO status for}';
+    protected $signature = 'smking:doctor {--path=__smking-doctor : Path to probe AEO status for (uses a synthetic path by default to avoid registering real URLs in the audit queue)}';
 
     protected $description = 'Verify smking SDK install + connectivity';
 
     public function handle(Application $app, HttpFactory $http, AeoClient $client): int
     {
         $checks = [
-            $this->checkProviderRegistered($app),
             $this->checkConfigPublished($app),
             $this->checkApiKey(),
             $this->checkBaseUrl(),
@@ -70,25 +68,17 @@ class DoctorCommand extends Command
     /**
      * @return array{status: 'pass'|'fail'|'info', label: string, detail: string}
      */
-    private function checkProviderRegistered(Application $app): array
-    {
-        $providers = $app->getLoadedProviders();
-
-        return array_key_exists(SmkingServiceProvider::class, $providers)
-            ? ['status' => 'pass', 'label' => 'ServiceProvider registered', 'detail' => SmkingServiceProvider::class]
-            : ['status' => 'fail', 'label' => 'ServiceProvider registered', 'detail' => 'auto-discover failed; run `composer dump-autoload`'];
-    }
-
-    /**
-     * @return array{status: 'pass'|'fail'|'info', label: string, detail: string}
-     */
     private function checkConfigPublished(Application $app): array
     {
         $path = $app->configPath('smking.php');
 
+        // mergeConfigFrom in the service provider already loads sensible
+        // defaults — publishing is only needed when the host wants to edit
+        // only/except patterns or inject.* flags. So this is informational,
+        // never a hard fail.
         return file_exists($path)
             ? ['status' => 'pass', 'label' => 'config/smking.php published', 'detail' => $path]
-            : ['status' => 'fail', 'label' => 'config/smking.php published', 'detail' => 'run `php artisan vendor:publish --tag=smking-config`'];
+            : ['status' => 'info', 'label' => 'config/smking.php published', 'detail' => 'optional — defaults from package are merged automatically. publish only if you need to edit only/except/inject.* in your repo.'];
     }
 
     /**
@@ -165,17 +155,38 @@ class DoctorCommand extends Command
             return ['status' => 'info', 'label' => 'API reachable', 'detail' => 'skipped — base_url not set'];
         }
 
+        // Probe the actual AEO endpoint rather than the base URL root. Hitting
+        // the root passes for *any* live host (typo'd domain, google.com, a
+        // dev landing page) — useless as a reachability signal. The endpoint
+        // rejects empty bodies with 400/422 (validation) or 401 (no key);
+        // either confirms the route exists and our server-side handler is
+        // mounted. 404 here means the SMKING_BASE_URL points somewhere that
+        // isn't a smking deployment.
+        $endpoint = rtrim($url, '/').'/api/v1/public/aeo';
         try {
-            $response = $http->timeout(2)->get($url);
+            $response = $http->timeout(2)->acceptJson()->asJson()->post($endpoint, []);
         } catch (Throwable $e) {
             return ['status' => 'fail', 'label' => 'API reachable', 'detail' => 'connection failed: '.$e->getMessage()];
         }
 
         $status = $response->status();
 
-        return $status < 500
-            ? ['status' => 'pass', 'label' => 'API reachable', 'detail' => "{$url} → HTTP {$status}"]
-            : ['status' => 'fail', 'label' => 'API reachable', 'detail' => "upstream {$status} from {$url}"];
+        if (in_array($status, [400, 401, 422], true)) {
+            return ['status' => 'pass', 'label' => 'API reachable', 'detail' => "{$endpoint} → HTTP {$status} (endpoint exists)"];
+        }
+
+        if ($status === 404) {
+            return ['status' => 'fail', 'label' => 'API reachable', 'detail' => "404 from {$endpoint} — base_url likely points at the wrong host"];
+        }
+
+        if ($status >= 500) {
+            return ['status' => 'fail', 'label' => 'API reachable', 'detail' => "upstream {$status} from {$endpoint}"];
+        }
+
+        // 200 / 2xx / 3xx with empty body shouldn't happen — it means the
+        // server accepted an invalid request without validation, which we
+        // surface so the customer can investigate.
+        return ['status' => 'fail', 'label' => 'API reachable', 'detail' => "unexpected HTTP {$status} from {$endpoint} (expected 400/401/422)"];
     }
 
     /**
