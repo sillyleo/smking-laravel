@@ -6,6 +6,7 @@ namespace Smking\Laravel;
 
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Support\ServiceProvider;
+use Smking\Laravel\Console\DoctorCommand;
 use Smking\Laravel\Http\Middleware\InjectAeo;
 use Smking\Laravel\View\Components\Aeo as AeoComponent;
 use Smking\Laravel\View\Components\Meta as MetaComponent;
@@ -48,16 +49,18 @@ class SmkingServiceProvider extends ServiceProvider
         ]);
 
         $this->registerMiddleware();
+
+        if ($this->app->runningInConsole()) {
+            $this->commands([DoctorCommand::class]);
+        }
     }
 
     private function registerMiddleware(): void
     {
-        if (! (bool) $this->app['config']->get('smking.auto_inject', true)) {
-            return;
-        }
-
-        // Only auto-register when running in HTTP context. Console (artisan,
-        // queue workers) would attach the middleware to the wrong kernel.
+        // Console (artisan, queue workers) would attach the middleware to the
+        // wrong kernel — skip. The auto_inject gate moved into the middleware
+        // itself (v0.2.0): when disabled it still emits verification headers
+        // so `php artisan smking:doctor` and `curl -I` keep working.
         if ($this->app->runningInConsole()) {
             return;
         }
