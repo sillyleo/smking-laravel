@@ -56,6 +56,12 @@ class AeoClient
             return AeoResponse::notFound();
         }
 
+        if ($this->baseUrl() === null) {
+            $this->logger?->warning('smking: SMKING_BASE_URL is not configured; set it in your .env to enable AEO discovery.');
+
+            return AeoResponse::notFound();
+        }
+
         $payload = array_filter(
             array_merge(['key' => $apiKey], $body),
             static fn ($value) => $value !== null && $value !== '',
@@ -133,10 +139,15 @@ class AeoClient
         return is_string($key) && $key !== '' ? $key : null;
     }
 
+    private function baseUrl(): ?string
+    {
+        $value = $this->config->get('smking.base_url');
+
+        return is_string($value) && $value !== '' ? rtrim($value, '/') : null;
+    }
+
     private function endpoint(string $path): string
     {
-        $base = rtrim((string) $this->config->get('smking.base_url', 'https://app.smking.io'), '/');
-
-        return $base.$path;
+        return ((string) $this->baseUrl()).$path;
     }
 }

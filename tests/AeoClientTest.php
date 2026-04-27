@@ -13,7 +13,7 @@ class AeoClientTest extends TestCase
     public function test_for_path_returns_ready_response(): void
     {
         Http::fake([
-            'app.smking.io/api/v1/public/aeo' => Http::response([
+            'api.test/api/v1/public/aeo' => Http::response([
                 'status' => 'ready',
                 'jsonLd' => ['@type' => 'Product', 'name' => 'Widget'],
                 'faq' => [['q' => 'Q?', 'a' => 'A.']],
@@ -32,7 +32,7 @@ class AeoClientTest extends TestCase
         $this->assertSame('Widget', $response->jsonLd['name']);
 
         Http::assertSent(function ($request) {
-            return $request->url() === 'https://app.smking.io/api/v1/public/aeo'
+            return $request->url() === 'https://api.test/api/v1/public/aeo'
                 && $request['key'] === 'pk_test_key'
                 && $request['path'] === '/products/widget'
                 && $request['url'] === 'https://shop.example/products/widget';
@@ -64,6 +64,17 @@ class AeoClientTest extends TestCase
     public function test_missing_api_key_short_circuits(): void
     {
         config()->set('smking.api_key', null);
+        Http::fake();
+
+        $response = $this->app->make(AeoClient::class)->forPath('/x');
+
+        $this->assertSame(AeoResponse::STATUS_NOT_FOUND, $response->status);
+        Http::assertNothingSent();
+    }
+
+    public function test_missing_base_url_short_circuits(): void
+    {
+        config()->set('smking.base_url', null);
         Http::fake();
 
         $response = $this->app->make(AeoClient::class)->forPath('/x');
