@@ -4,10 +4,8 @@ declare(strict_types=1);
 
 namespace Smking\Laravel\Tests\Console;
 
-use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
-use Smking\Laravel\Http\Middleware\InjectAeo;
 use Smking\Laravel\Tests\TestCase;
 
 class DoctorCommandTest extends TestCase
@@ -16,13 +14,9 @@ class DoctorCommandTest extends TestCase
     {
         parent::setUp();
 
-        // Service provider skips middleware registration in console
-        // (testbench runs in console env). Push manually so the doctor's
-        // 'Middleware in HTTP kernel' check has something to find.
-        $kernel = $this->app->make(HttpKernel::class);
-        if (method_exists($kernel, 'pushMiddleware')) {
-            $kernel->pushMiddleware(InjectAeo::class);
-        }
+        // v0.2.1: service provider now pushes middleware unconditionally
+        // (including in console env), so we no longer need to push manually
+        // here — testbench's HTTP kernel already has InjectAeo registered.
 
         // Testbench doesn't run vendor:publish; touch the config file so
         // 'config published' check passes.

@@ -5,7 +5,10 @@ declare(strict_types=1);
 namespace Smking\Laravel;
 
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
+use Illuminate\Foundation\Http\Kernel as FoundationKernel;
 use Illuminate\Support\ServiceProvider;
+use ReflectionClass;
+use ReflectionException;
 use Smking\Laravel\Console\DoctorCommand;
 use Smking\Laravel\Http\Middleware\InjectAeo;
 use Smking\Laravel\View\Components\Aeo as AeoComponent;
@@ -57,19 +60,46 @@ class SmkingServiceProvider extends ServiceProvider
 
     private function registerMiddleware(): void
     {
-        // Console (artisan, queue workers) would attach the middleware to the
-        // wrong kernel — skip. The auto_inject gate moved into the middleware
-        // itself (v0.2.0): when disabled it still emits verification headers
-        // so `php artisan smking:doctor` and `curl -I` keep working.
-        if ($this->app->runningInConsole()) {
-            return;
-        }
-
         /** @var HttpKernel $kernel */
         $kernel = $this->app->make(HttpKernel::class);
 
-        if (method_exists($kernel, 'pushMiddleware')) {
-            $kernel->pushMiddleware(InjectAeo::class);
+        if (! method_exists($kernel, 'pushMiddleware')) {
+            return;
         }
+
+        // v0.2.1: register on console too. pushMiddleware just mutates the
+        // HTTP kernel's protected $middleware array; the Console kernel
+        // (which actually runs `php artisan …`) is a separate instance with
+        // its own middleware stack, so this has no runtime side-effect on
+        // console commands. The win: `php artisan smking:doctor` can now
+        // reflect into the array and confirm InjectAeo is wired up.
+        if ($this->isMiddlewareRegistered($kernel)) {
+            return;
+        }
+
+        $kernel->pushMiddleware(InjectAeo::class);
+    }
+
+    /**
+     * Idempotency check — avoid double-pushing when service providers boot
+     * twice (rare but possible in test harnesses or custom dev setups).
+     */
+    private function isMiddlewareRegistered(HttpKernel $kernel): bool
+    {
+        if (! $kernel instanceof FoundationKernel) {
+            return false;
+        }
+
+        try {
+            $reflection = new ReflectionClass($kernel);
+            $property = $reflection->getProperty('middleware');
+            $property->setAccessible(true);
+            /** @var array<int, class-string> $middleware */
+            $middleware = (array) $property->getValue($kernel);
+        } catch (ReflectionException) {
+            return false;
+        }
+
+        return in_array(InjectAeo::class, $middleware, true);
     }
 }
