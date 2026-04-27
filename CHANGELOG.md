@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.2.4
+
+External audit (`docs/audit-smking-laravel.md`) caught two **High** severity correctness bugs that all four prior releases (v0.2.0 → v0.2.3) shipped. Fixing both.
+
+### High: SEO conflict detection now attribute-order-insensitive
+
+The previous regex (`<meta\s+name=["\']description["\']`) only matched when the identifying attribute came first. Common host markup like `<meta content="…" name="description">` (content first, name second — valid HTML) bypassed the check, and the middleware injected a duplicate description tag. Same bug class applied to `og:title`, `og:description`, `og:image`, and `<link rel="canonical">`.
+
+v0.2.4 scans every `<meta>` / `<link>` tag and looks for the identifying attribute pair anywhere in the tag, regardless of position.
+
+### High: Full-document guard prevents partial HTML corruption
+
+`injectBefore()` had a fallback that appended the fragment to the end of the string when `</head>` / `</body>` weren't found. HTMX, Turbo, and custom fragment endpoints often respond with raw chunks like `<div>…</div>` served as `text/html` — for which the middleware would happily append JSON-LD `<script>` and FAQ `<section>` to the fragment, corrupting it.
+
+v0.2.4 adds an `isFullHtmlDocument()` guard: requires both `<html` and at least one of `</head>` / `</body>` before any rewrite happens. Partial responses still get the verification headers but their body is left untouched.
+
+### Tests added
+
+- `test_skips_partial_html_fragment_response` — HTMX-style `<div>` chunk untouched, headers still emitted
+- `test_skips_html_fragment_with_html_tag_but_no_head_or_body` — half-document edge case
+- `test_respects_existing_meta_description_with_reversed_attribute_order` — `<meta content="…" name="description">` not overridden
+- `test_respects_existing_og_title_with_reversed_attribute_order`
+- `test_respects_existing_canonical_with_reversed_attribute_order`
+
+50 tests total (was 45).
+
 ## v0.2.3
 
 Full audit of v0.2.2 surfaced four critical issues and several smaller ones. This release fixes them in one batch.

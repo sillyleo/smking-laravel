@@ -76,6 +76,16 @@ class InjectAeo
             return $response;
         }
 
+        // Only rewrite full HTML documents. HTMX / Turbo / Livewire-style
+        // fragment endpoints often respond with raw `<div>...</div>` chunks
+        // that are still served as text/html — appending JSON-LD / FAQ /
+        // SEO meta to those would corrupt the fragment. Headers are still
+        // emitted above so the operator can see the SDK ran without our
+        // injection breaking partial responses.
+        if (! $this->isFullHtmlDocument($content)) {
+            return $response;
+        }
+
         $rewritten = $this->rewriteHtml($content, $aeo, $path, $request->fullUrl());
 
         if ($rewritten === $content) {
@@ -184,7 +194,7 @@ class InjectAeo
         }
 
         if (($flags['meta_description'] ?? true) && $aeo->metaDescription !== '') {
-            if (! preg_match('/<meta\s+name=["\']description["\']/i', $html)) {
+            if (! $this->tagHasAttribute($html, 'meta', 'name', 'description')) {
                 $headFragments[] = '<meta name="description" content="'.e($aeo->metaDescription).'" data-smking="aeo">';
             }
         }
@@ -195,6 +205,13 @@ class InjectAeo
         // their own Blade layout) keep their tags as the source of truth.
         // Mirrors WP Plugin §4 filter coexistence + Next.js mergeMetadata
         // strategy; the philosophy is "fill gaps, never override".
+        //
+        // Conflict detection is attribute-order-insensitive: we scan every
+        // <meta>/<link> tag and look for the identifying attribute pair
+        // anywhere in it, so `<meta content="…" name="description">`
+        // (content first) is recognized just like `<meta name="description"
+        // content="…">`. v0.2.3 and earlier matched only when the
+        // identifying attribute came first, missing common host templates.
         if ($aeo->seo !== null) {
             if (($flags['seo_title'] ?? true) && $aeo->seo->title !== null) {
                 if (! preg_match('/<title\b[^>]*>/i', $html)) {
@@ -203,25 +220,25 @@ class InjectAeo
             }
 
             if (($flags['og_title'] ?? true) && $aeo->seo->ogTitle !== null) {
-                if (! preg_match('/<meta\s+property=["\']og:title["\']/i', $html)) {
+                if (! $this->tagHasAttribute($html, 'meta', 'property', 'og:title')) {
                     $headFragments[] = '<meta property="og:title" content="'.e($aeo->seo->ogTitle).'" data-smking="seo">';
                 }
             }
 
             if (($flags['og_description'] ?? true) && $aeo->seo->ogDescription !== null) {
-                if (! preg_match('/<meta\s+property=["\']og:description["\']/i', $html)) {
+                if (! $this->tagHasAttribute($html, 'meta', 'property', 'og:description')) {
                     $headFragments[] = '<meta property="og:description" content="'.e($aeo->seo->ogDescription).'" data-smking="seo">';
                 }
             }
 
             if (($flags['og_image'] ?? true) && $aeo->seo->ogImageUrl !== null) {
-                if (! preg_match('/<meta\s+property=["\']og:image["\']/i', $html)) {
+                if (! $this->tagHasAttribute($html, 'meta', 'property', 'og:image')) {
                     $headFragments[] = '<meta property="og:image" content="'.e($aeo->seo->ogImageUrl).'" data-smking="seo">';
                 }
             }
 
             if (($flags['canonical'] ?? true) && $aeo->seo->canonicalUrl !== null) {
-                if (! preg_match('/<link\s+rel=["\']canonical["\']/i', $html)) {
+                if (! $this->tagHasAttribute($html, 'link', 'rel', 'canonical')) {
                     $headFragments[] = '<link rel="canonical" href="'.e($aeo->seo->canonicalUrl).'" data-smking="seo">';
                 }
             }
@@ -306,6 +323,59 @@ class InjectAeo
         }
 
         return in_array(app()->environment(), ['local', 'testing', 'development'], true);
+    }
+
+    /**
+     * Heuristic: is `$html` a full HTML document (vs an HTMX / Turbo /
+     * fragment chunk that just happens to be served as text/html)?
+     *
+     * Requires both an opening `<html` tag and at least one closing
+     * structural tag (`</head>` or `</body>`). Fragment endpoints typically
+     * have neither. Operators sending real HTML pages from Blade always
+     * have all three.
+     */
+    private function isFullHtmlDocument(string $html): bool
+    {
+        if (stripos($html, '<html') === false) {
+            return false;
+        }
+
+        return stripos($html, '</head>') !== false
+            || stripos($html, '</body>') !== false;
+    }
+
+    /**
+     * Attribute-order-insensitive check: does `$html` contain a `<$tagName>`
+     * tag whose attribute `$attrName` equals `$attrValue`?
+     *
+     * Replaces the previous regex-first detection, which only matched when
+     * the identifying attribute was the first one after the tag name —
+     * missing valid host markup like `<meta content="…" name="description">`.
+     */
+    private function tagHasAttribute(
+        string $html,
+        string $tagName,
+        string $attrName,
+        string $attrValue,
+    ): bool {
+        $tagPattern = '/<'.preg_quote($tagName, '/').'\b[^>]*>/i';
+        if (preg_match_all($tagPattern, $html, $matches) === 0) {
+            return false;
+        }
+
+        $attrPattern = '/\b'
+            .preg_quote($attrName, '/')
+            .'\s*=\s*["\']'
+            .preg_quote($attrValue, '/')
+            .'["\']/i';
+
+        foreach ($matches[0] as $tag) {
+            if (preg_match($attrPattern, $tag) === 1) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

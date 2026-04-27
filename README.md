@@ -38,7 +38,7 @@ After `composer require` + `vendor:publish` + `.env` setup, run:
 php artisan smking:doctor
 ```
 
-If everything is green, the install is complete. The doctor command checks the service provider is registered, the config is published, your API key + base URL are valid, the middleware is in the HTTP kernel, and the smking API is reachable.
+If everything is green, the install is complete. The doctor command runs six checks: config publish status (informational — defaults are merged automatically, publishing is only needed when you want to override `only`/`except`/`inject.*`), API key (must be set and start with `pk_`), base URL (must be set and a valid URL), middleware is in the HTTP kernel (reflection check), API reachable (POSTs an empty body to `{base_url}/api/v1/public/aeo` and expects 400/401/422 — confirms the endpoint exists rather than just any live host), and AEO status for a probe path (informational — defaults to a synthetic `__smking-doctor` so doctor runs don't pollute the audit queue with real URLs).
 
 For HTTP-level verification, hit any HTML page and look at the response headers:
 

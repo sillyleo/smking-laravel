@@ -412,6 +412,140 @@ class InjectAeoMiddlewareTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_skips_partial_html_fragment_response(): void
+    {
+        // HTMX / Turbo / fragment endpoints respond with chunks like
+        // `<div>...</div>` served as text/html. Appending JSON-LD / FAQ
+        // sections to them would corrupt the fragment. The middleware
+        // should still emit verification headers but leave the body alone.
+        config()->set('smking.debug', false);
+
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'jsonLd' => ['@type' => 'Product'],
+                'summary' => 'should not appear',
+                'faqHtml' => '<section class="smking-faq">should not appear</section>',
+                'summaryHtml' => '<section class="smking-summary">should not appear</section>',
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $original = '<div class="product-card"><h3>Widget</h3></div>';
+        $request = Request::create('/htmx/products/widget', 'GET');
+        $response = $middleware->handle($request, function () use ($original) {
+            return new Response($original, 200, ['Content-Type' => 'text/html']);
+        });
+
+        $this->assertSame($original, $response->getContent());
+        $this->assertStringNotContainsString('application/ld+json', (string) $response->getContent());
+        $this->assertStringNotContainsString('smking-faq', (string) $response->getContent());
+        // Headers still emitted so the operator can see the SDK ran.
+        $this->assertSame('ready', $response->headers->get('X-Smking-Status'));
+    }
+
+    public function test_skips_html_fragment_with_html_tag_but_no_head_or_body(): void
+    {
+        // Edge case: someone returns `<html>...</html>` as a fragment with
+        // no <head> or <body>. Without a closing structural tag, we can't
+        // safely position injection — emit headers, leave body alone.
+        config()->set('smking.debug', false);
+
+        Http::fake([
+            '*' => Http::response(['status' => 'ready', 'jsonLd' => ['@type' => 'Product']], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $original = '<html>just text, no head or body</html>';
+        $request = Request::create('/products/widget', 'GET');
+        $response = $middleware->handle($request, function () use ($original) {
+            return new Response($original, 200, ['Content-Type' => 'text/html']);
+        });
+
+        $this->assertSame($original, $response->getContent());
+        $this->assertSame('ready', $response->headers->get('X-Smking-Status'));
+    }
+
+    public function test_respects_existing_meta_description_with_reversed_attribute_order(): void
+    {
+        // Host layouts often write `<meta content="..." name="description">`
+        // (content first, name second) — valid HTML. v0.2.3 and earlier
+        // missed this and overrode it; v0.2.4 detects it.
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'metaDescription' => 'API description (should not be injected)',
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head><meta content="Host description" name="description"></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $html = (string) $response->getContent();
+        $this->assertStringContainsString('Host description', $html);
+        $this->assertStringNotContainsString('API description', $html);
+    }
+
+    public function test_respects_existing_og_title_with_reversed_attribute_order(): void
+    {
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'seo' => ['ogTitle' => 'API OG (should not be injected)'],
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head><meta content="Host OG" property="og:title"></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $html = (string) $response->getContent();
+        $this->assertStringContainsString('Host OG', $html);
+        $this->assertStringNotContainsString('API OG', $html);
+    }
+
+    public function test_respects_existing_canonical_with_reversed_attribute_order(): void
+    {
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'seo' => ['canonicalUrl' => 'https://api.example.com/api'],
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head><link href="https://host.example.com/host" rel="canonical"></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $html = (string) $response->getContent();
+        $this->assertStringContainsString('https://host.example.com/host', $html);
+        $this->assertStringNotContainsString('https://api.example.com/api', $html);
+    }
+
     public function test_does_not_inject_html_comment_when_debug_disabled(): void
     {
         config()->set('smking.debug', false);
