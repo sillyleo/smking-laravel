@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.2
+
+### Fixed
+- `curl -I` (HEAD requests) now receive the `X-Smking-Status` and `X-Smking-Path` headers. Previously `shouldInject()` only accepted GET, so HEAD requests bypassed the middleware entirely — install verification via `curl -I` silently returned no smking headers. HEAD is GET-without-body in HTTP semantics; the middleware now treats both methods identically for header emission and skips body rewrite when the response carries no content.
+
 ## v0.2.1
 
 ### Fixed

@@ -54,16 +54,18 @@ class InjectAeo
             return $response;
         }
 
+        $aeo = $this->client->forPath($path, $request->fullUrl());
+        $this->emitHeaders($response, $aeo->status, $path);
+
+        // HEAD responses (and the rare empty GET) carry no body to rewrite —
+        // headers are still emitted above so `curl -I` install verification
+        // works without a real GET. Frame skipping happens here, not in
+        // shouldInject(), so HEAD still gets the AeoResponse status header
+        // instead of a hardcoded fallback.
         $content = $response->getContent();
         if (! is_string($content) || $content === '') {
-            $this->emitHeaders($response, AeoResponse::STATUS_NOT_FOUND, $path);
-
             return $response;
         }
-
-        $aeo = $this->client->forPath($path, $request->fullUrl());
-
-        $this->emitHeaders($response, $aeo->status, $path);
 
         $rewritten = $this->rewriteHtml($content, $aeo, $path, $request->fullUrl());
 
@@ -83,7 +85,11 @@ class InjectAeo
 
     private function shouldInject(Request $request, Response $response): bool
     {
-        if (! $request->isMethod('GET')) {
+        // Accept GET *and* HEAD — HEAD is GET-without-body in HTTP semantics,
+        // and `curl -I` is the canonical install-verification command. Laravel
+        // dispatches HEAD to the same controller as GET; here we let it
+        // through so the X-Smking-* headers come back to the operator.
+        if (! in_array($request->method(), ['GET', 'HEAD'], true)) {
             return false;
         }
 
