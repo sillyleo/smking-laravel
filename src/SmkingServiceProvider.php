@@ -8,6 +8,7 @@ use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Support\ServiceProvider;
 use Smking\Laravel\Http\Middleware\InjectAeo;
 use Smking\Laravel\View\Components\Aeo as AeoComponent;
+use Smking\Laravel\View\Components\Meta as MetaComponent;
 
 class SmkingServiceProvider extends ServiceProvider
 {
@@ -43,6 +44,7 @@ class SmkingServiceProvider extends ServiceProvider
 
         $this->loadViewComponentsAs('smking', [
             'aeo' => AeoComponent::class,
+            'meta' => MetaComponent::class,
         ]);
 
         $this->registerMiddleware();

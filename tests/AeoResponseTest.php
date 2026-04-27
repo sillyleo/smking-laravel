@@ -42,6 +42,34 @@ class AeoResponseTest extends TestCase
         $this->assertFalse($response->isReady());
     }
 
+    public function test_parses_seo_payload(): void
+    {
+        $response = AeoResponse::fromArray([
+            'status' => 'ready',
+            'seo' => [
+                'title' => 'Blue Widget · Acme',
+                'ogTitle' => 'The Blue Widget You Want',
+                'ogDescription' => 'Cured by sun. Carried by hand.',
+                'ogImageUrl' => 'https://example.com/widget.png',
+                'canonicalUrl' => 'https://example.com/products/blue-widget',
+            ],
+        ]);
+
+        $this->assertNotNull($response->seo);
+        $this->assertSame('Blue Widget · Acme', $response->seo->title);
+        $this->assertSame('https://example.com/products/blue-widget', $response->seo->canonicalUrl);
+    }
+
+    public function test_seo_absent_keeps_field_null(): void
+    {
+        $response = AeoResponse::fromArray([
+            'status' => 'ready',
+            'jsonLd' => ['@type' => 'Product'],
+        ]);
+
+        $this->assertNull($response->seo);
+    }
+
     public function test_drops_malformed_faq_entries(): void
     {
         $response = AeoResponse::fromArray([

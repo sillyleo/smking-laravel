@@ -34,6 +34,7 @@ final class AeoResponse
         public readonly string $faqHtml = '',
         public readonly string $summaryHtml = '',
         public readonly ?array $chatLinks = null,
+        public readonly ?SeoMeta $seo = null,
     ) {
     }
 
@@ -62,6 +63,11 @@ final class AeoResponse
             ];
         }
 
+        $seo = null;
+        if (isset($payload['seo']) && is_array($payload['seo'])) {
+            $seo = SeoMeta::fromArray($payload['seo']);
+        }
+
         return new self(
             status: $status,
             jsonLd: isset($payload['jsonLd']) && is_array($payload['jsonLd']) ? $payload['jsonLd'] : null,
@@ -71,6 +77,7 @@ final class AeoResponse
             faqHtml: (string) ($payload['faqHtml'] ?? ''),
             summaryHtml: (string) ($payload['summaryHtml'] ?? ''),
             chatLinks: $chatLinks,
+            seo: $seo,
         );
     }
 
@@ -103,6 +110,7 @@ final class AeoResponse
             'faqHtml' => $this->faqHtml,
             'summaryHtml' => $this->summaryHtml,
             'chatLinks' => $this->chatLinks,
+            'seo' => $this->seo?->toArray(),
         ];
     }
 }

@@ -77,6 +77,115 @@ class InjectAeoMiddlewareTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_injects_seo_meta_when_host_has_no_existing_tags(): void
+    {
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'seo' => [
+                    'title' => 'Blue Widget · Acme',
+                    'ogTitle' => 'The Best Blue Widget',
+                    'ogDescription' => 'Hand-cured benefits.',
+                    'ogImageUrl' => 'https://example.com/widget.png',
+                    'canonicalUrl' => 'https://example.com/products/blue-widget',
+                ],
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/blue-widget', 'GET');
+        // Note: no <title>, no og:*, no canonical in the host HTML.
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head><meta charset="utf-8"></head><body><h1>Widget</h1></body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $html = (string) $response->getContent();
+
+        $this->assertStringContainsString('<title data-smking="seo">Blue Widget · Acme</title>', $html);
+        $this->assertStringContainsString('property="og:title" content="The Best Blue Widget"', $html);
+        $this->assertStringContainsString('property="og:description" content="Hand-cured benefits."', $html);
+        $this->assertStringContainsString('property="og:image" content="https://example.com/widget.png"', $html);
+        $this->assertStringContainsString('rel="canonical" href="https://example.com/products/blue-widget"', $html);
+    }
+
+    public function test_does_not_override_existing_title_or_canonical(): void
+    {
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'seo' => [
+                    'title' => 'API Title',
+                    'ogTitle' => 'API OG Title',
+                    'canonicalUrl' => 'https://example.com/api-canonical',
+                ],
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET');
+        // Host already wrote <title> and canonical — they MUST be preserved
+        // (mirrors WP filter coexistence + Next.js mergeMetadata strategy:
+        // we fill gaps, never override).
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head><title>Host Title</title><link rel="canonical" href="/host-canonical"></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $html = (string) $response->getContent();
+
+        // Host tags untouched.
+        $this->assertStringContainsString('<title>Host Title</title>', $html);
+        $this->assertStringNotContainsString('API Title', $html);
+        $this->assertStringContainsString('href="/host-canonical"', $html);
+        $this->assertStringNotContainsString('api-canonical', $html);
+        // og:title still injected because host didn't write it.
+        $this->assertStringContainsString('property="og:title" content="API OG Title"', $html);
+    }
+
+    public function test_seo_flags_disable_individual_tags(): void
+    {
+        config()->set('smking.inject.seo_title', false);
+        config()->set('smking.inject.canonical', false);
+
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'seo' => [
+                    'title' => 'API Title',
+                    'ogTitle' => 'API OG Title',
+                    'canonicalUrl' => 'https://example.com/c',
+                ],
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $html = (string) $response->getContent();
+
+        $this->assertStringNotContainsString('API Title', $html);
+        $this->assertStringNotContainsString('rel="canonical"', $html);
+        // og:title still on (default true).
+        $this->assertStringContainsString('property="og:title"', $html);
+    }
+
     public function test_skips_when_api_returns_not_ready(): void
     {
         Http::fake([

@@ -125,6 +125,44 @@ class InjectAeo
             }
         }
 
+        // SEO meta. Each tag has independent conflict detection — we only
+        // write a tag the host application hasn't written itself, so client
+        // sites that already use Yoast-equivalent solutions (or write meta in
+        // their own Blade layout) keep their tags as the source of truth.
+        // Mirrors WP Plugin §4 filter coexistence + Next.js mergeMetadata
+        // strategy; the philosophy is "fill gaps, never override".
+        if ($aeo->seo !== null) {
+            if (($flags['seo_title'] ?? true) && $aeo->seo->title !== null) {
+                if (! preg_match('/<title\b[^>]*>/i', $html)) {
+                    $headFragments[] = '<title data-smking="seo">'.e($aeo->seo->title).'</title>';
+                }
+            }
+
+            if (($flags['og_title'] ?? true) && $aeo->seo->ogTitle !== null) {
+                if (! preg_match('/<meta\s+property=["\']og:title["\']/i', $html)) {
+                    $headFragments[] = '<meta property="og:title" content="'.e($aeo->seo->ogTitle).'" data-smking="seo">';
+                }
+            }
+
+            if (($flags['og_description'] ?? true) && $aeo->seo->ogDescription !== null) {
+                if (! preg_match('/<meta\s+property=["\']og:description["\']/i', $html)) {
+                    $headFragments[] = '<meta property="og:description" content="'.e($aeo->seo->ogDescription).'" data-smking="seo">';
+                }
+            }
+
+            if (($flags['og_image'] ?? true) && $aeo->seo->ogImageUrl !== null) {
+                if (! preg_match('/<meta\s+property=["\']og:image["\']/i', $html)) {
+                    $headFragments[] = '<meta property="og:image" content="'.e($aeo->seo->ogImageUrl).'" data-smking="seo">';
+                }
+            }
+
+            if (($flags['canonical'] ?? true) && $aeo->seo->canonicalUrl !== null) {
+                if (! preg_match('/<link\s+rel=["\']canonical["\']/i', $html)) {
+                    $headFragments[] = '<link rel="canonical" href="'.e($aeo->seo->canonicalUrl).'" data-smking="seo">';
+                }
+            }
+        }
+
         $bodyFragments = [];
 
         if (($flags['summary_html'] ?? true) && $aeo->summaryHtml !== '') {

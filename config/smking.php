@@ -75,6 +75,16 @@ return [
         'meta_description' => true,
         'faq_html' => true,
         'summary_html' => true,
+
+        // SEO meta tags. All injectors detect existing tags first and skip
+        // when the host page already writes them — set false to disable
+        // entirely (e.g. when you render meta yourself via <x-smking-meta />
+        // or the Smking::metaFor() facade in your Blade layout).
+        'seo_title' => true,
+        'og_title' => true,
+        'og_description' => true,
+        'og_image' => true,
+        'canonical' => true,
     ],
 
     /*
