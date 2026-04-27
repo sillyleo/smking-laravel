@@ -17,6 +17,15 @@ use Symfony\Component\HttpFoundation\Response;
  *
  * AI crawlers (ChatGPT, Perplexity, Google AI) don't execute JavaScript, so
  * structured data must be server-rendered. Hence the middleware approach.
+ *
+ * Install-verification contract (v0.2.0):
+ *   - Every middleware-handled response carries X-Smking-Status + X-Smking-Path
+ *     headers, so `curl -I` is enough to verify the SDK is wired up.
+ *   - The `data-smking-injected="1"` attribute on <html> is decoupled from
+ *     content readiness — it appears whenever the middleware actually ran on
+ *     an HTML 200 GET, regardless of backend audit status.
+ *   - Local / development environments get a HTML comment explaining why
+ *     content wasn't injected; production stays silent.
  */
 class InjectAeo
 {
@@ -34,21 +43,30 @@ class InjectAeo
             return $response;
         }
 
+        $path = $this->normalizePath($request);
+
+        // auto_inject=false: emit verification headers but never touch HTML.
+        // The middleware still registers in v0.2.0 so doctor + curl -I work
+        // even when injection is disabled.
+        if (! (bool) $this->config->get('smking.auto_inject', true)) {
+            $this->emitHeaders($response, 'disabled', $path);
+
+            return $response;
+        }
+
         $content = $response->getContent();
         if (! is_string($content) || $content === '') {
+            $this->emitHeaders($response, AeoResponse::STATUS_NOT_FOUND, $path);
+
             return $response;
         }
 
-        $aeo = $this->client->forPath(
-            $this->normalizePath($request),
-            $request->fullUrl(),
-        );
+        $aeo = $this->client->forPath($path, $request->fullUrl());
 
-        if (! $aeo->isReady()) {
-            return $response;
-        }
+        $this->emitHeaders($response, $aeo->status, $path);
 
-        $rewritten = $this->inject($content, $aeo);
+        $rewritten = $this->rewriteHtml($content, $aeo, $path, $request->fullUrl());
+
         if ($rewritten === $content) {
             return $response;
         }
@@ -65,10 +83,6 @@ class InjectAeo
 
     private function shouldInject(Request $request, Response $response): bool
     {
-        if (! (bool) $this->config->get('smking.auto_inject', true)) {
-            return false;
-        }
-
         if (! $request->isMethod('GET')) {
             return false;
         }
@@ -105,7 +119,33 @@ class InjectAeo
         return $path === '/' ? '/' : rtrim($path, '/');
     }
 
-    private function inject(string $html, AeoResponse $aeo): string
+    private function emitHeaders(Response $response, string $status, string $path): void
+    {
+        $response->headers->set('X-Smking-Status', $status);
+        $response->headers->set('X-Smking-Path', $path);
+    }
+
+    private function rewriteHtml(string $html, AeoResponse $aeo, string $path, string $url): string
+    {
+        // Idempotency: if upstream already marked, leave entirely alone.
+        if (str_contains($html, 'data-smking-injected')) {
+            return $html;
+        }
+
+        if ($aeo->isReady()) {
+            $html = $this->injectReadyFragments($html, $aeo);
+        } elseif ($this->isDebugEnabled()) {
+            $html = $this->injectDevComment($html, $aeo->status, $path, $url);
+        }
+
+        // Mark always — even when no fragments were injected. This is the core
+        // decoupling: install verification works without the backend ready.
+        $marked = $this->markDocument($html);
+
+        return $marked ?? $html;
+    }
+
+    private function injectReadyFragments(string $html, AeoResponse $aeo): string
     {
         /** @var array<string, bool> $flags */
         $flags = (array) $this->config->get('smking.inject', []);
@@ -173,29 +213,29 @@ class InjectAeo
             $bodyFragments[] = $aeo->faqHtml;
         }
 
-        if ($headFragments === [] && $bodyFragments === []) {
-            return $html;
-        }
+        $html = $this->injectBefore($html, '</head>', implode('', $headFragments));
+        $html = $this->injectBefore($html, '</body>', implode('', $bodyFragments));
 
-        // Mark the document so the middleware is idempotent — safe across
-        // redirects, ESI includes, or cached content.
-        if (str_contains($html, 'data-smking-injected')) {
-            return $html;
-        }
+        return $html;
+    }
 
-        $html = $this->injectBefore(
-            $html,
-            '</head>',
-            implode('', $headFragments),
+    private function injectDevComment(string $html, string $status, string $path, string $url): string
+    {
+        $reason = match ($status) {
+            AeoResponse::STATUS_NOT_FOUND => 'backend has not crawled this path yet, or url unreachable from public internet (e.g. .test TLD)',
+            AeoResponse::STATUS_PENDING => 'backend is crawling, retry shortly',
+            default => 'unknown status',
+        };
+
+        $comment = sprintf(
+            '<!-- smking: middleware-ran path=%s status=%s url=%s reason=%s -->',
+            $this->safeComment($path),
+            $this->safeComment($status),
+            $this->safeComment($url),
+            $this->safeComment($reason),
         );
 
-        $html = $this->injectBefore(
-            $html,
-            '</body>',
-            implode('', $bodyFragments),
-        );
-
-        return $this->markInjected($html);
+        return $this->injectBefore($html, '</body>', $comment);
     }
 
     private function injectBefore(string $html, string $needle, string $fragment): string
@@ -212,22 +252,51 @@ class InjectAeo
         return substr($html, 0, $position).$fragment.substr($html, $position);
     }
 
-    private function markInjected(string $html): string
+    private function markDocument(string $html): ?string
     {
-        return preg_replace(
+        if (str_contains($html, 'data-smking-injected')) {
+            return $html;
+        }
+
+        $result = preg_replace(
             '/<html\b([^>]*)>/i',
             '<html$1 data-smking-injected="1">',
             $html,
             1,
-        ) ?? $html;
+        );
+
+        // No <html> tag found — caller falls back to original HTML, headers
+        // remain on the response so curl -I still verifies the install.
+        if ($result === null || $result === $html) {
+            return null;
+        }
+
+        return $result;
+    }
+
+    private function isDebugEnabled(): bool
+    {
+        $debug = $this->config->get('smking.debug');
+        if ($debug !== null) {
+            return (bool) $debug;
+        }
+
+        return in_array(app()->environment(), ['local', 'testing', 'development'], true);
     }
 
     /**
      * Prevent </script> inside the JSON from breaking out of the script tag.
-     * The spec only requires escaping the literal sequence.
      */
     private function safeScript(string $json): string
     {
         return str_replace('</', '<\/', $json);
+    }
+
+    /**
+     * Prevent the literal `--` from prematurely closing an HTML comment.
+     */
+    private function safeComment(string $value): string
+    {
+        return str_replace('--', '__', $value);
     }
 }

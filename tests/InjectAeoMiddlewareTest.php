@@ -44,9 +44,11 @@ class InjectAeoMiddlewareTest extends TestCase
         $this->assertStringContainsString('smking-summary', $html);
         $this->assertStringContainsString('smking-faq', $html);
         $this->assertStringContainsString('data-smking-injected="1"', $html);
+        $this->assertSame('ready', $response->headers->get('X-Smking-Status'));
+        $this->assertSame('/products/widget', $response->headers->get('X-Smking-Path'));
     }
 
-    public function test_skips_non_html_responses(): void
+    public function test_does_not_mark_non_html_responses(): void
     {
         Http::fake();
 
@@ -58,6 +60,24 @@ class InjectAeoMiddlewareTest extends TestCase
         });
 
         $this->assertSame('{"ok":true}', $response->getContent());
+        $this->assertNull($response->headers->get('X-Smking-Status'));
+        $this->assertNull($response->headers->get('X-Smking-Path'));
+        Http::assertNothingSent();
+    }
+
+    public function test_does_not_mark_non_200_responses(): void
+    {
+        Http::fake();
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/missing', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response('<html><body>404</body></html>', 404, ['Content-Type' => 'text/html']);
+        });
+
+        $this->assertStringNotContainsString('data-smking-injected', (string) $response->getContent());
+        $this->assertNull($response->headers->get('X-Smking-Status'));
         Http::assertNothingSent();
     }
 
@@ -74,6 +94,7 @@ class InjectAeoMiddlewareTest extends TestCase
         });
 
         $this->assertStringNotContainsString('smking', (string) $response->getContent());
+        $this->assertNull($response->headers->get('X-Smking-Status'));
         Http::assertNothingSent();
     }
 
@@ -111,6 +132,7 @@ class InjectAeoMiddlewareTest extends TestCase
         $this->assertStringContainsString('property="og:description" content="Hand-cured benefits."', $html);
         $this->assertStringContainsString('property="og:image" content="https://example.com/widget.png"', $html);
         $this->assertStringContainsString('rel="canonical" href="https://example.com/products/blue-widget"', $html);
+        $this->assertSame('ready', $response->headers->get('X-Smking-Status'));
     }
 
     public function test_does_not_override_existing_title_or_canonical(): void
@@ -186,20 +208,137 @@ class InjectAeoMiddlewareTest extends TestCase
         $this->assertStringContainsString('property="og:title"', $html);
     }
 
-    public function test_skips_when_api_returns_not_ready(): void
+    public function test_marks_html_even_when_aeo_not_ready(): void
     {
+        // Disable debug HTML comment for this test — the comment is exercised
+        // separately. Here we focus on the mark + header decoupling contract.
+        config()->set('smking.debug', false);
+
+        Http::fake([
+            '*' => Http::response(['status' => 'not_found'], 404),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/new', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head></head><body>new</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $html = (string) $response->getContent();
+
+        // Mark is present even though no fragments could be injected — this is
+        // the v0.2.0 install-verification contract.
+        $this->assertStringContainsString('data-smking-injected="1"', $html);
+        // No actual content fragments because backend hasn't crawled.
+        $this->assertStringNotContainsString('application/ld+json', $html);
+        $this->assertStringNotContainsString('smking-faq', $html);
+        // Headers always present once shouldInject passes.
+        $this->assertSame('not_found', $response->headers->get('X-Smking-Status'));
+        $this->assertSame('/products/new', $response->headers->get('X-Smking-Path'));
+    }
+
+    public function test_emits_pending_status_header(): void
+    {
+        config()->set('smking.debug', false);
+
         Http::fake([
             '*' => Http::response(['status' => 'pending'], 202),
         ]);
 
         $middleware = $this->app->make(InjectAeo::class);
 
-        $request = Request::create('/products/new', 'GET');
-        $original = '<html><head></head><body>new</body></html>';
+        $request = Request::create('/products/queued', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head></head><body>queued</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $this->assertStringContainsString('data-smking-injected="1"', (string) $response->getContent());
+        $this->assertSame('pending', $response->headers->get('X-Smking-Status'));
+    }
+
+    public function test_emits_disabled_header_when_auto_inject_off(): void
+    {
+        config()->set('smking.auto_inject', false);
+        Http::fake();
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $original = '<html><head></head><body>x</body></html>';
+        $request = Request::create('/some-path', 'GET');
         $response = $middleware->handle($request, function () use ($original) {
             return new Response($original, 200, ['Content-Type' => 'text/html']);
         });
 
+        // HTML untouched in disabled mode — no mark.
         $this->assertSame($original, $response->getContent());
+        // But headers still emit so doctor / curl -I can verify the SDK.
+        $this->assertSame('disabled', $response->headers->get('X-Smking-Status'));
+        $this->assertSame('/some-path', $response->headers->get('X-Smking-Path'));
+        // No API call when disabled — the middleware short-circuits.
+        Http::assertNothingSent();
+    }
+
+    public function test_injects_html_comment_when_debug_enabled(): void
+    {
+        config()->set('smking.debug', true);
+
+        Http::fake([
+            '*' => Http::response(['status' => 'not_found'], 404),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/local', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head></head><body>local-test</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $html = (string) $response->getContent();
+
+        $this->assertStringContainsString('<!-- smking:', $html);
+        $this->assertStringContainsString('path=/products/local', $html);
+        $this->assertStringContainsString('status=not_found', $html);
+        // Comment goes before </body>.
+        $this->assertMatchesRegularExpression('/<!-- smking:[^>]*-->\s*<\/body>/', $html);
+    }
+
+    public function test_does_not_inject_html_comment_when_debug_disabled(): void
+    {
+        config()->set('smking.debug', false);
+
+        Http::fake([
+            '*' => Http::response(['status' => 'not_found'], 404),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/prod', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head></head><body>prod-test</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $html = (string) $response->getContent();
+
+        $this->assertStringNotContainsString('<!-- smking:', $html);
+        // Mark + header still appear — only the comment is suppressed.
+        $this->assertStringContainsString('data-smking-injected="1"', $html);
+        $this->assertSame('not_found', $response->headers->get('X-Smking-Status'));
     }
 }

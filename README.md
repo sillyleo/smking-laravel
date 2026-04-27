@@ -30,6 +30,33 @@ That's it — the middleware auto-registers. Every HTML GET response now picks u
 
 The middleware never overrides tags your layout already writes — it only fills gaps. So Yoast / your existing meta-writing tooling stays the source of truth.
 
+## Install verification
+
+After `composer require` + `vendor:publish` + `.env` setup, run:
+
+```bash
+php artisan smking:doctor
+```
+
+If everything is green, the install is complete. The doctor command checks the service provider is registered, the config is published, your API key + base URL are valid, the middleware is in the HTTP kernel, and the smking API is reachable.
+
+For HTTP-level verification, hit any HTML page and look at the response headers:
+
+```bash
+curl -I http://your-app.test/
+```
+
+You should see two headers — these confirm the middleware ran, regardless of whether the smking backend has audited your URL yet:
+
+```
+X-Smking-Status: ready | pending | not_found | disabled
+X-Smking-Path: /<your-path>
+```
+
+The `data-smking-injected="1"` HTML attribute also appears on every page where middleware ran (HTML 200 GET, not in `except` patterns). Content injection (JSON-LD, FAQ, SEO meta) only appears once status reaches `ready` — which requires the URL to be reachable from the public internet so the backend can crawl it.
+
+> **Local dev with `.test` / `.local` TLDs**: the backend can't reach your machine, so status stays at `not_found` until you deploy. The middleware mark and the `X-Smking-*` headers still verify the install — `php artisan smking:doctor` is the authoritative install signal. In `local` / `testing` / `development` environments you'll also see an HTML comment near `</body>` explaining why content wasn't injected.
+
 ## Manual usage
 
 Disable auto-injection and render where you want:

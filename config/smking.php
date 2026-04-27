@@ -40,6 +40,23 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Debug Mode
+    |--------------------------------------------------------------------------
+    |
+    | When true, the middleware emits an HTML comment in non-ready responses
+    | explaining why content wasn't injected (e.g. backend hasn't crawled the
+    | URL yet, or the URL is on a private TLD like .test). Useful for install
+    | verification and local development.
+    |
+    | `null` (default) auto-detects: enabled in local / testing / development
+    | environments, off in production / staging. Set true / false in your env
+    | to force.
+    |
+    */
+    'debug' => env('SMKING_DEBUG', null),
+
+    /*
+    |--------------------------------------------------------------------------
     | Path Filters
     |--------------------------------------------------------------------------
     |
