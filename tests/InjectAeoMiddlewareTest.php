@@ -337,6 +337,81 @@ class InjectAeoMiddlewareTest extends TestCase
         $this->assertMatchesRegularExpression('/<!-- smking:[^>]*-->\s*<\/body>/', $html);
     }
 
+    public function test_does_not_rewrite_gzipped_response_body(): void
+    {
+        // PHP output_compression / webserver-level gzip middleware can hand
+        // us a binary body with Content-Encoding: gzip. preg_replace on
+        // gzipped bytes corrupts the payload, so the middleware must skip
+        // the rewrite and only emit the verification headers.
+        config()->set('smking.debug', false);
+
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'jsonLd' => ['@type' => 'Product'],
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        // Pretend the body is already gzipped — content unchanged.
+        $original = "\x1f\x8b\x08\x00fake-gzipped-bytes";
+        $request = Request::create('/products/widget', 'GET');
+        $response = $middleware->handle($request, function () use ($original) {
+            return new Response($original, 200, [
+                'Content-Type' => 'text/html',
+                'Content-Encoding' => 'gzip',
+            ]);
+        });
+
+        $this->assertSame($original, $response->getContent());
+        // Headers still emitted — verification works without rewriting.
+        $this->assertSame('ready', $response->headers->get('X-Smking-Status'));
+        $this->assertSame('/products/widget', $response->headers->get('X-Smking-Path'));
+    }
+
+    public function test_skips_attachment_responses(): void
+    {
+        // text/html download — must not inject AEO into a file the user is
+        // saving to disk.
+        Http::fake();
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $original = '<html><body>report</body></html>';
+        $request = Request::create('/reports/q4.html', 'GET');
+        $response = $middleware->handle($request, function () use ($original) {
+            return new Response($original, 200, [
+                'Content-Type' => 'text/html',
+                'Content-Disposition' => 'attachment; filename="q4.html"',
+            ]);
+        });
+
+        $this->assertSame($original, $response->getContent());
+        $this->assertNull($response->headers->get('X-Smking-Status'));
+        Http::assertNothingSent();
+    }
+
+    public function test_emits_disabled_header_for_head_method(): void
+    {
+        // Combination of v0.2.2 (HEAD support) + v0.2.0 (auto_inject=false
+        // emits disabled header) — this slipped through both releases'
+        // tests.
+        config()->set('smking.auto_inject', false);
+        Http::fake();
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/some-path', 'HEAD');
+        $response = $middleware->handle($request, function () {
+            return new Response('', 200, ['Content-Type' => 'text/html']);
+        });
+
+        $this->assertSame('disabled', $response->headers->get('X-Smking-Status'));
+        $this->assertSame('/some-path', $response->headers->get('X-Smking-Path'));
+        Http::assertNothingSent();
+    }
+
     public function test_does_not_inject_html_comment_when_debug_disabled(): void
     {
         config()->set('smking.debug', false);

@@ -114,7 +114,18 @@ class AeoClient
 
         $store = $cacheConfig['store'] ?? null;
         $repository = $store ? $this->cache->store($store) : $this->cache->store();
-        $cacheKey = ($cacheConfig['prefix'] ?? 'smking:aeo:').http_build_query($keyParts);
+
+        // Namespace the cache key by (api_key, base_url) so rotating either
+        // automatically invalidates stale entries instead of waiting for ttl
+        // to expire. Without this, switching SMKING_BASE_URL or rotating the
+        // pk_ key leaves up-to-an-hour-old not_found / ready responses in the
+        // cache, which looks like the SDK is broken.
+        $namespace = substr(
+            hash('sha256', ($this->apiKey() ?? '').'|'.($this->baseUrl() ?? '')),
+            0,
+            12,
+        );
+        $cacheKey = ($cacheConfig['prefix'] ?? 'smking:aeo:').$namespace.':'.http_build_query($keyParts);
 
         $cached = $repository->get($cacheKey);
         if ($cached instanceof AeoResponse) {
@@ -123,11 +134,20 @@ class AeoClient
 
         $response = $resolver();
 
-        // Don't cache pending — we want to recheck on the next request so
-        // users get fresh content as soon as the crawler finishes.
-        if ($response->status !== AeoResponse::STATUS_PENDING) {
-            $repository->put($cacheKey, $response, $ttl);
+        // Don't cache pending — recheck on next request so users get fresh
+        // content the moment the crawler finishes.
+        if ($response->status === AeoResponse::STATUS_PENDING) {
+            return $response;
         }
+
+        // not_found uses a short ttl: the customer's first request triggers
+        // backend audit, and within a couple of minutes the path flips to
+        // ready. A long not_found cache here would mask that flip until ttl
+        // expired (up to an hour by default).
+        $writeTtl = $response->status === AeoResponse::STATUS_NOT_FOUND
+            ? min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 30))
+            : $ttl;
+        $repository->put($cacheKey, $response, $writeTtl);
 
         return $response;
     }

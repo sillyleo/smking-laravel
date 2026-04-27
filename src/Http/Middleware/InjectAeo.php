@@ -57,6 +57,15 @@ class InjectAeo
         $aeo = $this->client->forPath($path, $request->fullUrl());
         $this->emitHeaders($response, $aeo->status, $path);
 
+        // If the response body is already encoded (gzip / br / deflate) we
+        // can't rewrite it without decoding first — str_contains / preg_replace
+        // would corrupt the binary payload. Emit headers above for install
+        // verification, but leave the body untouched. Customers running
+        // PHP output_compression or a webserver-level gzip module land here.
+        if ((string) $response->headers->get('Content-Encoding', '') !== '') {
+            return $response;
+        }
+
         // HEAD responses (and the rare empty GET) carry no body to rewrite —
         // headers are still emitted above so `curl -I` install verification
         // works without a real GET. Frame skipping happens here, not in
@@ -99,6 +108,15 @@ class InjectAeo
 
         $contentType = (string) $response->headers->get('Content-Type', '');
         if ($contentType !== '' && stripos($contentType, 'text/html') === false) {
+            return false;
+        }
+
+        // Don't touch HTML downloads. Even when Content-Type is text/html,
+        // `Content-Disposition: attachment` means the user is downloading a
+        // file (HTML report, exported document) — injecting AEO content
+        // there ships unwanted markup into the saved file.
+        $disposition = (string) $response->headers->get('Content-Disposition', '');
+        if ($disposition !== '' && stripos($disposition, 'attachment') !== false) {
             return false;
         }
 

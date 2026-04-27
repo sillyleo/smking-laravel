@@ -71,12 +71,34 @@ return [
     ],
 
     'except' => [
+        // API routes — middleware should never touch JSON / non-HTML.
         'api/*',
+        'v1/*',
+        'v2/*',
+        'graphql',
+        'webhooks/*',
+        'oauth/*',
+
+        // Real-time / live components — Livewire diff payloads aren't HTML
+        // documents and break if rewritten.
         'livewire/*',
+
+        // Health checks and platform endpoints.
+        'up', // Laravel 11 default health route
+        'health',
+        'healthz',
+        'ping',
+
+        // Dev tooling — debug bars / error overlays / queue dashboards.
         'telescope*',
         'horizon*',
         '_ignition*',
+        '_debugbar*',
+
+        // Admin dashboards — assume auth-only, AEO content is public-facing.
         'admin*',
+        'nova*',
+        'filament*',
     ],
 
     /*
@@ -119,6 +141,12 @@ return [
         'enabled' => true,
         'store' => env('SMKING_CACHE_STORE'),
         'ttl' => env('SMKING_CACHE_TTL', 3600),
+
+        // Short TTL for not_found responses so the customer's cache doesn't
+        // mask the moment the backend finishes auditing the path. ready
+        // responses keep the full ttl above.
+        'not_found_ttl' => env('SMKING_NOT_FOUND_TTL', 30),
+
         'prefix' => 'smking:aeo:',
     ],
 
