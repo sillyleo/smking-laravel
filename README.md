@@ -28,7 +28,7 @@ That's it — the middleware auto-registers. Every HTML GET response now picks u
 - **AEO** — JSON-LD, FAQ/summary blocks (for ChatGPT, Perplexity, Google AI)
 - **SEO** — `<title>`, `og:*`, `twitter:*`, `<link rel="canonical">` (for Google snippet + social shares)
 
-The middleware never overrides tags your layout already writes — it only fills gaps. So Yoast / your existing meta-writing tooling stays the source of truth.
+smking is the source of truth for SEO/AEO meta. Any existing `<title>`, `<meta name="description">`, `og:*`, or `<link rel="canonical">` in your layout is stripped and replaced with smking's version (v0.3.0+). To keep a tag under your control, disable it via `config('smking.inject.{tag}', false)` or render it yourself with the `<x-smking-meta />` Blade component.
 
 ## Install verification
 
@@ -106,7 +106,7 @@ The `<x-smking-meta />` component mirrors `getSmkingMetadata()` from `@smking/ne
 1. Middleware runs after your response is built.
 2. For each HTML `GET` 200, it calls `POST /api/v1/public/aeo` with the request path.
 3. If smking has ready content, structured data + SEO meta go into `<head>`; FAQ + summary go before `</body>`.
-4. **Conflict detection**: every SEO tag (`<title>`, `og:*`, `canonical`, `meta description`) is only written when the host page hasn't already written it — so Yoast-equivalent tooling, custom Blade layouts, or hand-written meta tags stay untouched.
+4. **Always override** (v0.3.0+): every enabled SEO tag (`<title>`, `og:*`, `canonical`, `meta description`) gets written by smking. Any matching host markup is stripped first (attribute-order-insensitive) so the document only ever has one of each. To keep a tag under your control, set `config('smking.inject.{tag}', false)` or render it yourself.
 5. Unknown paths are registered for background crawling — next request will serve content.
 6. Responses are cached per path in Laravel's cache. Pending/error states fail open.
 

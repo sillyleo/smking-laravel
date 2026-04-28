@@ -135,7 +135,7 @@ class InjectAeoMiddlewareTest extends TestCase
         $this->assertSame('ready', $response->headers->get('X-Smking-Status'));
     }
 
-    public function test_does_not_override_existing_title_or_canonical(): void
+    public function test_overrides_existing_title_and_canonical(): void
     {
         Http::fake([
             '*' => Http::response([
@@ -151,9 +151,10 @@ class InjectAeoMiddlewareTest extends TestCase
         $middleware = $this->app->make(InjectAeo::class);
 
         $request = Request::create('/products/widget', 'GET');
-        // Host already wrote <title> and canonical — they MUST be preserved
-        // (mirrors WP filter coexistence + Next.js mergeMetadata strategy:
-        // we fill gaps, never override).
+        // v0.3.0 — always override. Host's <title> and <link rel="canonical">
+        // get stripped before smking injects its own. smking is the source of
+        // truth; customers install us precisely to replace placeholder /
+        // hardcoded SEO output.
         $response = $middleware->handle($request, function () {
             return new Response(
                 '<html><head><title>Host Title</title><link rel="canonical" href="/host-canonical"></head><body>x</body></html>',
@@ -164,13 +165,16 @@ class InjectAeoMiddlewareTest extends TestCase
 
         $html = (string) $response->getContent();
 
-        // Host tags untouched.
-        $this->assertStringContainsString('<title>Host Title</title>', $html);
-        $this->assertStringNotContainsString('API Title', $html);
-        $this->assertStringContainsString('href="/host-canonical"', $html);
-        $this->assertStringNotContainsString('api-canonical', $html);
-        // og:title still injected because host didn't write it.
+        // Host tags stripped, API tags injected.
+        $this->assertStringNotContainsString('<title>Host Title</title>', $html);
+        $this->assertStringContainsString('<title data-smking="seo">API Title</title>', $html);
+        $this->assertStringNotContainsString('/host-canonical', $html);
+        $this->assertStringContainsString('href="https://example.com/api-canonical"', $html);
+        // og:title injected normally.
         $this->assertStringContainsString('property="og:title" content="API OG Title"', $html);
+        // Document only ever has one <title> after strip+inject.
+        $this->assertSame(1, substr_count($html, '<title'));
+        $this->assertSame(1, preg_match_all('/rel="canonical"/i', $html));
     }
 
     public function test_seo_flags_disable_individual_tags(): void
@@ -468,15 +472,17 @@ class InjectAeoMiddlewareTest extends TestCase
         $this->assertSame('ready', $response->headers->get('X-Smking-Status'));
     }
 
-    public function test_respects_existing_meta_description_with_reversed_attribute_order(): void
+    public function test_overrides_existing_meta_description_with_reversed_attribute_order(): void
     {
         // Host layouts often write `<meta content="..." name="description">`
-        // (content first, name second) — valid HTML. v0.2.3 and earlier
-        // missed this and overrode it; v0.2.4 detects it.
+        // (content first, name second) — valid HTML. v0.3.0 strips that tag
+        // (attribute-order-insensitive) before injecting smking's version,
+        // so the host's hardcoded fallback gets replaced by the API's
+        // generated description.
         Http::fake([
             '*' => Http::response([
                 'status' => 'ready',
-                'metaDescription' => 'API description (should not be injected)',
+                'metaDescription' => 'API description from smking',
             ], 200),
         ]);
 
@@ -492,16 +498,18 @@ class InjectAeoMiddlewareTest extends TestCase
         });
 
         $html = (string) $response->getContent();
-        $this->assertStringContainsString('Host description', $html);
-        $this->assertStringNotContainsString('API description', $html);
+        $this->assertStringNotContainsString('Host description', $html);
+        $this->assertStringContainsString('API description from smking', $html);
+        // Only one <meta name="description"> after strip+inject.
+        $this->assertSame(1, preg_match_all('/name="description"/i', $html));
     }
 
-    public function test_respects_existing_og_title_with_reversed_attribute_order(): void
+    public function test_overrides_existing_og_title_with_reversed_attribute_order(): void
     {
         Http::fake([
             '*' => Http::response([
                 'status' => 'ready',
-                'seo' => ['ogTitle' => 'API OG (should not be injected)'],
+                'seo' => ['ogTitle' => 'API OG from smking'],
             ], 200),
         ]);
 
@@ -517,11 +525,12 @@ class InjectAeoMiddlewareTest extends TestCase
         });
 
         $html = (string) $response->getContent();
-        $this->assertStringContainsString('Host OG', $html);
-        $this->assertStringNotContainsString('API OG', $html);
+        $this->assertStringNotContainsString('Host OG', $html);
+        $this->assertStringContainsString('API OG from smking', $html);
+        $this->assertSame(1, preg_match_all('/property="og:title"/i', $html));
     }
 
-    public function test_respects_existing_canonical_with_reversed_attribute_order(): void
+    public function test_overrides_existing_canonical_with_reversed_attribute_order(): void
     {
         Http::fake([
             '*' => Http::response([
@@ -542,8 +551,9 @@ class InjectAeoMiddlewareTest extends TestCase
         });
 
         $html = (string) $response->getContent();
-        $this->assertStringContainsString('https://host.example.com/host', $html);
-        $this->assertStringNotContainsString('https://api.example.com/api', $html);
+        $this->assertStringNotContainsString('https://host.example.com/host', $html);
+        $this->assertStringContainsString('https://api.example.com/api', $html);
+        $this->assertSame(1, preg_match_all('/rel="canonical"/i', $html));
     }
 
     public function test_does_not_inject_html_comment_when_debug_disabled(): void
