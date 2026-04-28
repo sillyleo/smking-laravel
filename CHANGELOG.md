@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.7.4 — config fail-open when SDK vendor is missing
+
+Real customer hit on the sleepytofu.com Laravel deploy: `composer.lock` was out of sync with `composer.json`, so the production CI's `composer install --no-interaction` skipped `smking/laravel` (lock-strict mode) but left the previously-published `config/smking.php` in place. Laravel boot then loaded the config, hit `'except' => Defaults::EXCEPT_PATTERNS` at line 108, and crashed the entire app with `Class "Smking\Laravel\Defaults" not found` — every page on the site went 500 until they fixed the lock.
+
+The customer's lock hygiene was the trigger, but the SDK shouldn't be able to crash the host app's boot just because our vendor is missing. We claim a fail-open philosophy ("missing env / unreachable backend never breaks the page render") — this case violated it.
+
+### fix: `class_exists()` guard around the `Defaults` reference in the published config
+
+```php
+'except' => class_exists(Defaults::class) ? Defaults::EXCEPT_PATTERNS : [],
+```
+
+`use Smking\Laravel\Defaults;` is just a namespace alias — it doesn't trigger autoload, so the config file parses fine even when the class isn't in vendor. `class_exists()` triggers an autoload attempt; on miss it returns false, the ternary returns `[]`, and Laravel's config loader keeps going. The SDK's service provider isn't registered (because the package itself is missing), so middleware never runs and customer notices the missing functionality through the usual signals (no `X-Smking-*` headers, `smking:doctor` command not present) rather than a 500 across the entire site.
+
+This is the only line in `config/smking.php` that actually executes a SDK-namespaced class reference — the comment block above (`Defaults::EXCEPT_PATTERNS` / `Defaults::SUGGESTED_BUSINESS_EXCEPT` examples) is just documentation, not executed.
+
+### Customer immediate fix (independent of this release)
+
+Customers hitting `Class "Smking\Laravel\Defaults" not found` need to fix their `composer.lock`:
+
+```bash
+composer update smking/laravel    # regenerate lock with correct version
+git add composer.json composer.lock
+git commit -m "chore: pin smking/laravel in lock"
+git push
+```
+
+CI's `composer install` will then resolve the package correctly. Upgrading to v0.7.4+ on top doesn't bypass this — but once they land on v0.7.4, the same lock inconsistency on a future deploy won't crash the entire app.
+
+### No new tests
+
+Simulating "vendor missing" inside our own phpunit suite (which depends on the vendor) requires either reflection-based class table manipulation or a separate test app. Neither is justified for what amounts to a one-character semantic change. The guard's correctness is self-evident from PHP's `class_exists()` autoload semantics, and the regression is caught implicitly: every existing test loads `config/smking.php` successfully, so the guard is verified positive-path. The negative path (class actually missing) is the customer's accidental real-world test.
+
+133 tests still passing.
+
 ## v0.7.3 — phpunit auto-skip + URL query-string privacy
 
 Two real defects surfaced by a customer install audit on the sleepytofu.com Laravel project. Both are SDK-side responsibility, both shipped as a single patch.

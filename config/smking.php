@@ -105,7 +105,16 @@ return [
     //       ...Defaults::SUGGESTED_BUSINESS_EXCEPT,
     //       'my/store-specific/path',
     //   ],
-    'except' => Defaults::EXCEPT_PATTERNS,
+    //
+    // v0.7.4: `class_exists()` guard so this config loads even when the
+    // SDK vendor folder is missing (e.g. `composer.lock` out of sync with
+    // `composer.json` on first deploy — `composer install` skips the
+    // package and Laravel boots a published config without the source
+    // class). Without the guard, `Defaults::EXCEPT_PATTERNS` triggers a
+    // hard `Class not found` at framework boot and the entire app
+    // crashes. Empty fallback keeps host app alive; SDK simply does
+    // nothing until the vendor is restored.
+    'except' => class_exists(Defaults::class) ? Defaults::EXCEPT_PATTERNS : [],
 
     /*
     |--------------------------------------------------------------------------
