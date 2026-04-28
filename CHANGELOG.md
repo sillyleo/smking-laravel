@@ -4,6 +4,20 @@
 
 **Major outage hardening + behavior changes**. Customers must bump composer constraint `^0.6` → `^0.7`.
 
+### feat(concurrency): single-flight cache lock — million-PV thundering-herd protection
+
+Adversarial review (codex) caught the missing piece: under a cold key + concurrent requests, every PHP-FPM worker would otherwise enter the upstream call simultaneously before any cache write lands — the 24hr `server_error` TTL only takes effect AFTER a write, so the first wave still saturates the worker pool.
+
+v0.7.0 wraps both `remember()` (forPath) and `rememberMarkdown()` with a cache lock (`Cache::lock()`):
+
+- One worker acquires the lock, calls upstream, writes cache, releases.
+- Concurrent workers find lock held, fail open immediately — `forPath` returns `notFound`, `getMarkdown` returns `null`. They DO NOT block on the upstream call.
+- After the lock-holder writes cache, all subsequent requests hit cache directly (no lock needed).
+
+Lock TTL: `connect_timeout + read_timeout + 2s` slack (default ~5s) — short enough that a crashed worker doesn't permanently block the key. Falls back to plain fetch+write if the cache driver lacks lock support (regression-safe).
+
+Production behavior: instead of N concurrent workers each holding a worker for 1.5s on a cold path, ONE worker holds for 1.5s and the rest fail open in microseconds. **Real fix for million-PV cold-start** — not just steady-state.
+
 ### feat(outage): three-tier cache TTL — million-PV protection
 
 `AeoClient` now distinguishes three negative-cache outcomes:
@@ -36,26 +50,33 @@ SMKING_HTTP_TIMEOUT=1.5
 
 Million-PV sites can drop further (`SMKING_HTTP_TIMEOUT=1`, `SMKING_CONNECT_TIMEOUT=0.5`). Combined with the 24hr `server_error` cache, a single timeout barely matters — first request fails fast, then 24hr cache absorbs everything.
 
-### feat(except): expand defaults for e-commerce + auth — `Defaults::EXCEPT_PATTERNS`
+### feat(except): two-layer Defaults — technical-only by default, business routes opt-in
 
-New `Defaults::EXCEPT_PATTERNS` const exposes the package's recommended baseline as a public surface so customers who published config under v0.6 can pull in v0.7's expanded patterns by spreading the const without re-publishing:
+Adversarial review pushed back on a design mistake: shipping `cart`, `checkout`, `account`, `login`, etc. as defaults assumes customer URL conventions the SDK has no way to know. Different sites use `/cart` vs `/購物車` vs `/shopping-bag`; `/login` vs `/sign-in` vs `/auth/login`. SDK can't make those calls for the customer.
+
+v0.7.0 ships **two** const arrays:
+
+- `Defaults::EXCEPT_PATTERNS` — **technical-only**, used by the published config:
+  - Laravel API conventions (`api/*`, `v1/*`, `oauth/*`, `webhooks/*`, …)
+  - Realtime / SPA endpoints (`livewire/*`)
+  - HTTP health check standards (`up`, `health`, `healthz`, `ping`)
+  - Dev tooling (`telescope*`, `horizon*`, `_debugbar*`, `_ignition*`)
+  - Admin packages (`nova*`, `filament*`)
+  - **Removed from the default**: `admin*` (customer-specific path), all
+    cart/checkout/account/login/etc. patterns
+
+- `Defaults::SUGGESTED_BUSINESS_EXCEPT` — **template, not enabled by default**. Lists common e-commerce + auth patterns (root + wildcard variants of `cart`, `checkout`, `account`, `profile`, `dashboard`, `login`, `sign-in`, `register`, `password`, etc.) for customers to copy-paste after reviewing their actual `php artisan route:list` output:
 
 ```php
-// config/smking.php
+// config/smking.php — opt-in spread
 'except' => [
     ...\Smking\Laravel\Defaults::EXCEPT_PATTERNS,
-    'my/custom/path',
+    ...\Smking\Laravel\Defaults::SUGGESTED_BUSINESS_EXCEPT,
+    'my/store-specific/path',
 ],
 ```
 
-New patterns added in v0.7.0 (legacy patterns still included):
-
-- `cart`, `cart/*`, `checkout`, `checkout/*` — session-state pages
-- `account/*`, `profile/*` — credentialed dashboards
-- `login`, `logout`, `register` — auth flows
-- `password/*`, `forgot-password*`, `reset-password*` — credential management
-
-These pages either depend on session state (cart contents) or carry no SEO-relevant content (login forms). Sending them upstream wasted audit budget and leaked per-user paths into the queue.
+Both root (`account`) and wildcard (`account/*`) patterns are included — Laravel's `Request::is('account/*')` does NOT match `/account`, so you need both to cover dashboard root + sub-routes.
 
 ### feat: `php artisan smking:cache:purge <path>`
 
@@ -67,7 +88,7 @@ Per-path cache invalidation for both AEO and markdown surfaces. Supports the out
 
 New section walks through the three-tier cache, timeout knobs, `SMKING_AUTO_INJECT=false` kill switch, and `cache:purge` recovery path. Read this before you go to prod.
 
-### Tests added (15 new)
+### Tests added (21 new)
 
 - `test_5xx_response_treated_as_server_error_not_not_found`
 - `test_4xx_response_still_treated_as_not_found`
@@ -80,16 +101,23 @@ New section walks through the three-tier cache, timeout knobs, `SMKING_AUTO_INJE
 - `test_config_uses_defaults_const`
 - `test_purge_removes_aeo_and_markdown_keys_for_path`
 - `test_purge_only_clears_current_namespace_after_key_rotation`
+- `test_single_flight_lock_lifecycle_does_not_leak`
+- `test_single_flight_falls_back_when_driver_lacks_lock`
+- `test_single_flight_re_checks_cache_after_lock_acquired`
+- `test_get_markdown_without_env_does_not_leak_status_across_calls`
+- `test_default_except_does_NOT_include_business_assumptions`
+- `test_suggested_business_except_includes_root_and_wildcard_variants`
 - (+ regression rename `test_failed_request_returns_not_found` → `test_failed_4xx_returns_not_found`)
 
-91 tests total (was 80).
+97 tests total (was 80).
 
 ### Internal
 
 - `AeoClient::connectTimeout()`, `AeoClient::readTimeout()` — new private helpers
 - `AeoClient::cacheNamespace()`, `AeoClient::cacheKeyPrefixes()`, `AeoClient::cacheStore()` — new `@internal` public methods (for the cache-purge command)
-- `AeoClient::$lastMarkdownStatus` — request-scoped sidechannel so `rememberMarkdown` knows whether `fetchMarkdown` returned null due to not_found or server_error
-- `Smking\Laravel\Defaults` — new public const class
+- `AeoClient::singleFlight()` + `AeoClient::singleFlightMarkdown()` — new private cache-lock wrappers
+- `AeoClient::fetchMarkdown()` now returns `array{body: ?string, status: string}` (was `?string` + mutable `$lastMarkdownStatus` instance prop, removed in adversarial-review fix)
+- `Smking\Laravel\Defaults` — new public const class with two layers (`EXCEPT_PATTERNS` technical-only + `SUGGESTED_BUSINESS_EXCEPT` opt-in template)
 - `Smking\Laravel\Console\CachePurgeCommand` — new artisan command
 
 ### Migration

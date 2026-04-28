@@ -120,6 +120,10 @@ The `<x-smking-meta />` component mirrors `getSmkingMetadata()` from `@smking/ne
 
 When the smking SaaS is down or unreachable, the SDK fails open — your pages still render normally, just without smking-injected content. Three knobs you may want to know about:
 
+### 0. Single-flight cache lock prevents thundering herd (v0.7.0+)
+
+When a path is uncached and traffic spikes, only ONE PHP-FPM worker calls smking upstream — others fail open immediately (return un-injected page) instead of all blocking on the same upstream call. Prevents the worker pool from saturating during cold-start or right after cache expiry. Uses `Cache::lock()`; works with redis / memcached / database drivers (recommended for production), graceful fallback for drivers without lock support.
+
 ### 1. Cache absorbs most outages automatically (v0.7.0+)
 
 Three-tier cache TTL since v0.7.0:

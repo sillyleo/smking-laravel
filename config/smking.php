@@ -72,16 +72,29 @@ return [
         // 'shop/*',
     ],
 
-    // Default to the package's recommended baseline (api/* + livewire/* +
-    // health/dev tooling/admin/* + e-commerce/auth flows). Customers can
-    // append or replace by spreading the const:
+    // Two-layer default:
+    //
+    //   EXCEPT_PATTERNS         — technical-only (api/*, livewire/*,
+    //                             telescope*, horizon*, health checks, etc.).
+    //                             Safe across all Laravel sites because the
+    //                             framework / packages own those paths.
+    //
+    //   SUGGESTED_BUSINESS_EXCEPT — common e-commerce + auth patterns
+    //                             (cart, checkout, account, login, …).
+    //                             **NOT enabled by default** — URL naming
+    //                             varies per site (`/cart` vs `/購物車`).
+    //                             Run `php artisan route:list` to identify
+    //                             your session-bound / no-public-content
+    //                             routes, then either spread the const or
+    //                             write your own list.
+    //
+    // Typical customer config after review:
     //
     //   'except' => [
     //       ...Defaults::EXCEPT_PATTERNS,
-    //       'my/custom/path',
+    //       ...Defaults::SUGGESTED_BUSINESS_EXCEPT,
+    //       'my/store-specific/path',
     //   ],
-    //
-    // Or replace entirely with their own array if they want a different baseline.
     'except' => Defaults::EXCEPT_PATTERNS,
 
     /*

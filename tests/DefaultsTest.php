@@ -8,46 +8,83 @@ use Smking\Laravel\Defaults;
 
 class DefaultsTest extends TestCase
 {
-    public function test_default_except_includes_ecommerce_and_auth_routes(): void
+    public function test_default_except_covers_technical_routes(): void
     {
+        // EXCEPT_PATTERNS only includes routes the framework / known
+        // packages own — paths every Laravel site has in the same place.
         $expected = [
-            'cart',
-            'cart/*',
-            'checkout',
-            'checkout/*',
-            'account/*',
-            'login',
-            'register',
-            'password/*',
-        ];
-
-        foreach ($expected as $pattern) {
-            $this->assertContains($pattern, Defaults::EXCEPT_PATTERNS, "EXCEPT_PATTERNS missing `{$pattern}`");
-        }
-    }
-
-    public function test_default_except_still_covers_legacy_categories(): void
-    {
-        // Regression — the v0.6.x baseline must survive the v0.7.0 expansion.
-        $legacy = [
             'api/*',
             'livewire/*',
             'telescope*',
             'horizon*',
-            'admin*',
-            'up',
+            'up', // Laravel 11 health route
+            'nova*',
+            'filament*',
         ];
 
-        foreach ($legacy as $pattern) {
-            $this->assertContains($pattern, Defaults::EXCEPT_PATTERNS, "EXCEPT_PATTERNS lost legacy `{$pattern}`");
+        foreach ($expected as $pattern) {
+            $this->assertContains($pattern, Defaults::EXCEPT_PATTERNS, "EXCEPT_PATTERNS missing technical pattern `{$pattern}`");
         }
     }
 
-    public function test_config_uses_defaults_const(): void
+    public function test_default_except_does_NOT_include_business_assumptions(): void
     {
-        // The published config/smking.php must reference Defaults::EXCEPT_PATTERNS,
-        // not a hand-maintained copy — otherwise drift would let the two go
-        // out of sync, which is exactly the bug we're trying to prevent.
+        // SDK must not assume customer URL conventions for business pages.
+        // `/cart` / `/account` / `/login` naming varies per site.
+        // These belong in SUGGESTED_BUSINESS_EXCEPT for opt-in spread.
+        $businessAssumptions = [
+            'cart',
+            'checkout',
+            'account',
+            'account/*',
+            'login',
+            'register',
+            'admin*', // Nova/Filament covered separately; admin is a customer convention
+        ];
+
+        foreach ($businessAssumptions as $pattern) {
+            $this->assertNotContains($pattern, Defaults::EXCEPT_PATTERNS, "EXCEPT_PATTERNS leaked business assumption `{$pattern}` — move to SUGGESTED_BUSINESS_EXCEPT");
+        }
+    }
+
+    public function test_suggested_business_except_includes_root_and_wildcard_variants(): void
+    {
+        // Laravel's `Request::is('account/*')` does NOT match `/account` —
+        // need both patterns. SUGGESTED_BUSINESS_EXCEPT must cover both.
+        $rootAndWildcardPairs = [
+            ['cart', 'cart/*'],
+            ['account', 'account/*'],
+            ['password', 'password/*'],
+            ['checkout', 'checkout/*'],
+        ];
+
+        foreach ($rootAndWildcardPairs as [$root, $wildcard]) {
+            $this->assertContains($root, Defaults::SUGGESTED_BUSINESS_EXCEPT, "missing root pattern `{$root}`");
+            $this->assertContains($wildcard, Defaults::SUGGESTED_BUSINESS_EXCEPT, "missing wildcard pattern `{$wildcard}`");
+        }
+    }
+
+    public function test_suggested_business_except_includes_common_naming_variants(): void
+    {
+        // Different sites use different conventions — include the common
+        // ones so customers can pick what matches their actual routes.
+        $variants = [
+            'cart', 'basket',                        // shopping container
+            'login', 'sign-in',                      // auth entry
+            'register', 'sign-up',                   // auth signup
+            'account', 'profile', 'dashboard',       // user area roots
+        ];
+
+        foreach ($variants as $pattern) {
+            $this->assertContains($pattern, Defaults::SUGGESTED_BUSINESS_EXCEPT, "missing common naming variant `{$pattern}`");
+        }
+    }
+
+    public function test_config_uses_only_technical_defaults(): void
+    {
+        // The published `config/smking.php` must reference EXCEPT_PATTERNS
+        // (technical-only), NOT SUGGESTED_BUSINESS_EXCEPT — customers must
+        // explicitly opt-in to business-route exclusion.
         $config = require __DIR__.'/../config/smking.php';
 
         $this->assertSame(Defaults::EXCEPT_PATTERNS, $config['except']);

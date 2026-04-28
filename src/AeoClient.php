@@ -59,22 +59,27 @@ class AeoClient
      */
     public function getMarkdown(string $path): ?string
     {
-        return $this->rememberMarkdown($path, function () use ($path): ?string {
+        return $this->rememberMarkdown($path, function () use ($path): array {
             return $this->fetchMarkdown($path);
         });
     }
 
-    private function fetchMarkdown(string $path): ?string
+    /**
+     * @return array{body: ?string, status: string}
+     *   body   — markdown content, or null if missing/unreachable
+     *   status — ready | not_found | server_error (drives cache TTL choice)
+     */
+    private function fetchMarkdown(string $path): array
     {
         $apiKey = $this->apiKey();
         if ($apiKey === null) {
-            return null;
+            return ['body' => null, 'status' => AeoResponse::STATUS_NOT_FOUND];
         }
 
         if ($this->baseUrl() === null) {
             $this->logger?->warning('smking: SMKING_BASE_URL is not configured; set it in your .env to enable markdown rendering.');
 
-            return null;
+            return ['body' => null, 'status' => AeoResponse::STATUS_NOT_FOUND];
         }
 
         try {
@@ -83,9 +88,9 @@ class AeoClient
                 ->timeout($this->readTimeout())
                 ->withHeaders(['Accept' => 'text/markdown'])
                 ->get($this->endpoint('/api/v1/public/md'), [
-                'key' => $apiKey,
-                'path' => $path,
-            ]);
+                    'key' => $apiKey,
+                    'path' => $path,
+                ]);
         } catch (Throwable $e) {
             $this->logger?->warning('smking: markdown fetch failed', [
                 'message' => $e->getMessage(),
@@ -94,35 +99,28 @@ class AeoClient
 
             // v0.7.0: signal "server_error" so the cache layer applies the
             // long 24hr TTL instead of the short not_found 15min.
-            $this->lastMarkdownStatus = AeoResponse::STATUS_SERVER_ERROR;
-
-            return null;
+            return ['body' => null, 'status' => AeoResponse::STATUS_SERVER_ERROR];
         }
 
         if (! $response->successful()) {
-            $this->lastMarkdownStatus = $response->status() >= 500
-                ? AeoResponse::STATUS_SERVER_ERROR
-                : AeoResponse::STATUS_NOT_FOUND;
-
-            return null;
+            return [
+                'body' => null,
+                'status' => $response->status() >= 500
+                    ? AeoResponse::STATUS_SERVER_ERROR
+                    : AeoResponse::STATUS_NOT_FOUND,
+            ];
         }
 
         $body = $response->body();
-        $this->lastMarkdownStatus = AeoResponse::STATUS_READY;
 
-        return $body !== '' ? $body : null;
+        return [
+            'body' => $body !== '' ? $body : null,
+            'status' => $body !== '' ? AeoResponse::STATUS_READY : AeoResponse::STATUS_NOT_FOUND,
+        ];
     }
 
     /**
-     * Side-channel for {@see fetchMarkdown()} to communicate why it returned
-     * null (not_found vs server_error) so {@see rememberMarkdown()} can
-     * choose the right cache TTL. PHP request-scoped, no thread issues
-     * (FPM workers are single-threaded per request).
-     */
-    private string $lastMarkdownStatus = AeoResponse::STATUS_NOT_FOUND;
-
-    /**
-     * @param  callable(): ?string  $resolver
+     * @param  callable(): array{body: ?string, status: string}  $resolver
      */
     private function rememberMarkdown(string $path, callable $resolver): ?string
     {
@@ -131,7 +129,7 @@ class AeoClient
         $ttl = (int) ($cacheConfig['ttl'] ?? 3600);
 
         if (! $enabled || $ttl <= 0) {
-            return $resolver();
+            return $resolver()['body'];
         }
 
         $store = $cacheConfig['store'] ?? null;
@@ -153,22 +151,73 @@ class AeoClient
             return null;
         }
 
-        $result = $resolver();
+        // v0.7.0 single-flight protection — same logic as forPath()'s
+        // singleFlight(), adapted for the markdown surface (cached value
+        // is string|false rather than AeoResponse).
+        return $this->singleFlightMarkdown($repository, $cacheKey, $cacheConfig, $ttl, $resolver);
+    }
 
-        if ($result === null) {
-            // v0.7.0 three-tier TTL on negative cache: not_found vs
-            // server_error — same 24hr-vs-15min split as forPath().
-            $writeTtl = $this->lastMarkdownStatus === AeoResponse::STATUS_SERVER_ERROR
-                ? (int) ($cacheConfig['server_error_ttl'] ?? 86400)
-                : min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900));
-            $repository->put($cacheKey, false, $writeTtl);
+    /**
+     * Single-flight wrapper for markdown fetches. Same protection model
+     * as {@see singleFlight()} but adapted for the markdown cache value
+     * type (string body | false sentinel).
+     *
+     * @param  array<string, mixed>  $cacheConfig
+     * @param  callable(): array{body: ?string, status: string}  $resolver
+     */
+    private function singleFlightMarkdown(
+        \Illuminate\Contracts\Cache\Repository $repository,
+        string $cacheKey,
+        array $cacheConfig,
+        int $ttl,
+        callable $resolver,
+    ): ?string {
+        $writeResult = function (array $result) use ($repository, $cacheKey, $cacheConfig, $ttl): void {
+            if ($result['body'] === null) {
+                $writeTtl = $result['status'] === AeoResponse::STATUS_SERVER_ERROR
+                    ? (int) ($cacheConfig['server_error_ttl'] ?? 86400)
+                    : min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900));
+                $repository->put($cacheKey, false, $writeTtl);
 
+                return;
+            }
+            $repository->put($cacheKey, $result['body'], $ttl);
+        };
+
+        if (! method_exists($repository, 'lock')) {
+            $result = $resolver();
+            $writeResult($result);
+
+            return $result['body'];
+        }
+
+        $lockKey = $cacheKey.':lock';
+        $lockTtl = max(5, (int) ceil($this->readTimeout() + $this->connectTimeout() + 2));
+
+        $lock = $repository->lock($lockKey, $lockTtl);
+        if (! $lock->get()) {
+            // Another worker is fetching upstream — fail open with null
+            // (middleware falls through to HTML).
             return null;
         }
 
-        $repository->put($cacheKey, $result, $ttl);
+        try {
+            // Re-check after lock acquired — race between get() and lock().
+            $cached = $repository->get($cacheKey);
+            if (is_string($cached)) {
+                return $cached;
+            }
+            if ($cached === false) {
+                return null;
+            }
 
-        return $result;
+            $result = $resolver();
+            $writeResult($result);
+
+            return $result['body'];
+        } finally {
+            $lock->release();
+        }
     }
 
     /**
@@ -290,29 +339,93 @@ class AeoClient
             return $cached;
         }
 
-        $response = $resolver();
+        // v0.7.0 single-flight protection: under concurrent traffic to a
+        // cold key, all workers would otherwise call upstream simultaneously
+        // (cache stampede / thundering herd). One worker takes a short lock
+        // and does the upstream fetch + cache write; others fail open so
+        // worker pool stays healthy.
+        return $this->singleFlight($repository, $cacheKey, $resolver, function (AeoResponse $response) use ($repository, $cacheKey, $cacheConfig, $ttl): void {
+            // Don't cache pending — recheck on next request.
+            if ($response->status === AeoResponse::STATUS_PENDING) {
+                return;
+            }
 
-        // Don't cache pending — recheck on next request so users get fresh
-        // content the moment the crawler finishes.
-        if ($response->status === AeoResponse::STATUS_PENDING) {
+            // v0.7.0 three-tier TTL:
+            //   ready        → full ttl (default 1hr)
+            //   not_found    → not_found_ttl (default 15min, was 30s)
+            //   server_error → server_error_ttl (default 24hr) — kills retry
+            //                  loop against a dead upstream so million-PV
+            //                  sites don't saturate FPM workers
+            $writeTtl = match ($response->status) {
+                AeoResponse::STATUS_READY => $ttl,
+                AeoResponse::STATUS_NOT_FOUND => min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900)),
+                AeoResponse::STATUS_SERVER_ERROR => (int) ($cacheConfig['server_error_ttl'] ?? 86400),
+                default => $ttl,
+            };
+            $repository->put($cacheKey, $response, $writeTtl);
+        });
+    }
+
+    /**
+     * Single-flight wrapper around the upstream call. Exactly one concurrent
+     * worker gets the lock and does the network fetch + cache write; others
+     * return a fail-open response (notFound — middleware behavior identical
+     * to "we have no content for this path") so they don't block on the
+     * upstream.
+     *
+     * Lock contention is not an error — it just means another worker is
+     * doing the work. The lock TTL is short (slightly longer than the read
+     * timeout) so a crashed worker doesn't permanently block the key.
+     *
+     * @param  callable(): AeoResponse  $resolver  upstream call (only the
+     *         lock-holder runs this)
+     * @param  callable(AeoResponse): void  $writer  write the result to
+     *         cache with the right TTL (only runs after a successful lock)
+     */
+    private function singleFlight(
+        \Illuminate\Contracts\Cache\Repository $repository,
+        string $cacheKey,
+        callable $resolver,
+        callable $writer,
+    ): AeoResponse {
+        if (! method_exists($repository, 'lock')) {
+            // Cache driver doesn't support locks (file driver in some
+            // versions). Fall back to plain fetch+write — race is possible
+            // but the worst case is N redundant upstream calls (same as
+            // pre-v0.7.0 behavior).
+            $response = $resolver();
+            $writer($response);
+
             return $response;
         }
 
-        // v0.7.0 three-tier TTL:
-        //   ready        → full ttl (default 1hr)
-        //   not_found    → not_found_ttl (default 15min, was 30s)
-        //   server_error → server_error_ttl (default 24hr) — kills retry loop
-        //                  against a dead upstream so million-PV sites don't
-        //                  saturate FPM workers waiting on a 5xx every 30s
-        $writeTtl = match ($response->status) {
-            AeoResponse::STATUS_READY => $ttl,
-            AeoResponse::STATUS_NOT_FOUND => min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900)),
-            AeoResponse::STATUS_SERVER_ERROR => (int) ($cacheConfig['server_error_ttl'] ?? 86400),
-            default => $ttl,
-        };
-        $repository->put($cacheKey, $response, $writeTtl);
+        $lockKey = $cacheKey.':lock';
+        $lockTtl = max(5, (int) ceil($this->readTimeout() + $this->connectTimeout() + 2));
 
-        return $response;
+        $lock = $repository->lock($lockKey, $lockTtl);
+        if (! $lock->get()) {
+            // Another worker is already calling upstream. Fail open — return
+            // notFound so this worker's response goes back to the user
+            // immediately. Next request to this path (any worker) will hit
+            // cache once the lock-holder finishes.
+            return AeoResponse::notFound();
+        }
+
+        try {
+            // Re-check cache after acquiring lock — between get() and lock()
+            // another worker may have already populated it.
+            $cached = $repository->get($cacheKey);
+            if ($cached instanceof AeoResponse) {
+                return $cached;
+            }
+
+            $response = $resolver();
+            $writer($response);
+
+            return $response;
+        } finally {
+            $lock->release();
+        }
     }
 
     private function apiKey(): ?string
