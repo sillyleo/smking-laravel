@@ -289,6 +289,53 @@ class AeoClientTest extends TestCase
         $this->assertTrue($response->isReady());
     }
 
+    public function test_lock_acquired_on_arraystore_lockprovider(): void
+    {
+        // Regression for codex round-2 finding: previously we gated lock
+        // usage on `method_exists($repository, 'lock')`, but Repository
+        // routes lock() via __call to the underlying store — the check
+        // was always false even on lock-capable drivers. Fix detects
+        // LockProvider on the underlying store (ArrayStore implements it).
+        config()->set('smking.cache.enabled', true);
+
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response(['status' => 'ready'], 200),
+        ]);
+
+        $client = $this->app->make(AeoClient::class);
+
+        // Pre-acquire the lock for a path — concurrent worker should be
+        // blocked. ArrayStore's ArrayLock IS instance-shared via the
+        // store's static array, so this DOES test the contention path.
+        /** @var \Illuminate\Contracts\Cache\Factory $factory */
+        $factory = $this->app->make(\Illuminate\Contracts\Cache\Factory::class);
+        $repo = $factory->store();
+
+        $this->assertInstanceOf(
+            \Illuminate\Contracts\Cache\LockProvider::class,
+            $repo->getStore(),
+            'ArrayStore must implement LockProvider — if this fails the supportsLock detection is irrelevant'
+        );
+
+        // Acquire lock manually using same key shape as AeoClient
+        $prefixes = $client->cacheKeyPrefixes();
+        $cacheKey = $prefixes['aeo'].http_build_query(['path' => '/locked']);
+        $lockKey = $cacheKey.':lock';
+        $externalLock = $repo->lock($lockKey, 30);
+        $this->assertTrue($externalLock->get(), 'external lock must be acquirable');
+
+        try {
+            $response = $client->forPath('/locked');
+
+            // Single-flight: lock contention → fail-open with notFound,
+            // no upstream call.
+            $this->assertSame(\Smking\Laravel\Data\AeoResponse::STATUS_NOT_FOUND, $response->status);
+            Http::assertNothingSent();
+        } finally {
+            $externalLock->release();
+        }
+    }
+
     public function test_single_flight_re_checks_cache_after_lock_acquired(): void
     {
         // After we get the lock, check cache once more in case another worker

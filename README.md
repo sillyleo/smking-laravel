@@ -116,6 +116,47 @@ The `<x-smking-meta />` component mirrors `getSmkingMetadata()` from `@smking/ne
 8. **Agent discovery** (v0.5.0+): every HTML response advertises the markdown alternate via `Link: <{url}>; rel="alternate"; type="text/markdown"` (RFC 8288). Appended to any existing Link headers; idempotent if you already wired your own.
 9. **Visually-hidden body fragments by default** (v0.6.0+): auto-injected `summaryHtml` / `faqHtml` are wrapped in an inline-style sr-only `<div>` so they don't pollute SPA layouts where `</body>` injection lands outside `#app`. Microdata stays in the DOM (Googlebot reads it); JSON-LD in `<head>` is the primary AEO signal. Switch with `SMKING_INJECT_VISIBILITY=visible` if you want the v0.5.x behavior. The `<x-smking-aeo />` Blade component is unaffected — explicit placement is always rendered as you wrote it.
 
+## Gradual rollout / A/B comparison
+
+`config('smking.only')` is a strict whitelist — when non-empty, the middleware only runs on paths that match. Use it to roll out smking gradually, or to A/B-compare smking-enabled paths against untouched ones.
+
+### Soft launch one URL
+
+```php
+// config/smking.php
+'only' => ['products/widget'],
+```
+
+Now only `https://your-site.com/products/widget` gets smking-injected meta + JSON-LD. Every other page is untouched. Measure impact for a week before expanding.
+
+### Expand to one section
+
+```php
+'only' => ['products/*'],
+```
+
+All product pages enabled, rest of site untouched. Continue measuring against control pages (homepage, blog, etc.).
+
+### A/B comparison
+
+```php
+'only' => [
+    'products/widget',   // Variant A — smking enabled
+    'products/gizmo',    // Variant B — smking enabled
+    // 'products/sprocket' — Control: NOT in `only`, no smking
+],
+```
+
+Compare AEO score / search ranking / AI-citation share across the three pages over your measurement window.
+
+### Full rollout
+
+```php
+'only' => [],   // empty == every HTML page (default behavior)
+```
+
+`only` patterns use Laravel's `Request::is()` syntax, identical to `except`. Combine both — `only` is checked first (must match), then `except` (must not match) — so you can whitelist `products/*` and blacklist `products/draft-*` simultaneously.
+
 ## Outage Runbook
 
 When the smking SaaS is down or unreachable, the SDK fails open — your pages still render normally, just without smking-injected content. Three knobs you may want to know about:

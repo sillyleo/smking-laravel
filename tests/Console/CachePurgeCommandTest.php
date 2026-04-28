@@ -46,6 +46,36 @@ class CachePurgeCommandTest extends TestCase
         $this->assertFalse($store->has($mdKey), 'markdown cache should be purged');
     }
 
+    public function test_purge_canonicalizes_trailing_slash_to_match_middleware(): void
+    {
+        // Codex round-2 finding: middleware writes cache under canonical
+        // path (no trailing slash), but pre-fix purge command used the
+        // raw CLI argument. Operator running `smking:cache:purge /x/`
+        // would "succeed" without clearing the real `/x` entry —
+        // disastrous during outage recovery (24hr server_error TTL).
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response(['status' => 'ready'], 200),
+        ]);
+
+        $client = $this->app->make(AeoClient::class);
+
+        // Prime cache via canonical path (what middleware writes).
+        $client->forPath('/products/widget');
+
+        $store = $this->app->make(CacheRepository::class);
+        $prefixes = $client->cacheKeyPrefixes();
+        $aeoKey = $prefixes['aeo'].http_build_query(['path' => '/products/widget']);
+
+        $this->assertTrue($store->has($aeoKey), 'cache must be primed under canonical path');
+
+        // Operator runs purge with the visible URL (trailing slash).
+        // Pre-fix this would target a different cache key and miss.
+        $this->artisan('smking:cache:purge', ['path' => '/products/widget/'])
+            ->assertExitCode(0);
+
+        $this->assertFalse($store->has($aeoKey), 'canonical-path entry MUST be purged when input has trailing slash');
+    }
+
     public function test_purge_only_clears_current_namespace_after_key_rotation(): void
     {
         // Prime cache with one api_key

@@ -6,6 +6,7 @@ namespace Smking\Laravel\Console;
 
 use Illuminate\Console\Command;
 use Smking\Laravel\AeoClient;
+use Smking\Laravel\Support\PathNormalizer;
 
 /**
  * `php artisan smking:cache:purge <path>` — invalidate one cached AEO entry.
@@ -32,7 +33,13 @@ class CachePurgeCommand extends Command
 
     public function handle(AeoClient $client): int
     {
-        $path = (string) $this->argument('path');
+        $rawPath = (string) $this->argument('path');
+        // Canonicalize identically to InjectAeo middleware — without this,
+        // `smking:cache:purge /x/` would build the cache key for `/x/`,
+        // but the middleware writes under `/x`, so purge says "success"
+        // while the real entry survives the full server_error TTL.
+        $path = PathNormalizer::canonical($rawPath);
+
         $store = $client->cacheStore();
         $prefixes = $client->cacheKeyPrefixes();
 
@@ -42,6 +49,9 @@ class CachePurgeCommand extends Command
         $store->forget($aeoKey);
         $store->forget($mdKey);
 
+        if ($rawPath !== $path) {
+            $this->line("Input path canonicalized: {$rawPath} → {$path}");
+        }
         $this->info("Purged smking cache for path: {$path}");
         $this->line("  aeo  → {$aeoKey}");
         $this->line("  md   → {$mdKey}");

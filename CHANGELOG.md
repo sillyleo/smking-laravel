@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.7.0 — pre-release adversarial review fixes (round 2)
+
+A second adversarial review (codex) caught three real defects in the round-1 fixes. Folded into v0.7.0 before tagging.
+
+### [critical] Single-flight lock detection was inert
+
+`supportsLock` previously used `method_exists($repository, 'lock')`. Laravel's `Repository` doesn't declare `lock()` — it forwards via `__call` to the underlying store. Result: the check was always false and `singleFlight()` / `singleFlightMarkdown()` silently fell back to plain fetch+write on EVERY driver, including redis/memcached/database/array — exactly the production drivers the protection was supposed to cover.
+
+Fix: detect via `$repository->getStore() instanceof Illuminate\Contracts\Cache\LockProvider`. Verified with regression test using `ArrayStore` (which IS a `LockProvider`) — pre-acquire the lock, then assert `forPath()` returns `notFound` without sending any HTTP request, proving the contention path actually fires.
+
+### [high] `smking:cache:purge` could miss the real cache key
+
+Middleware canonicalizes paths (strips trailing slashes from non-root URLs) before writing cache. The purge command used the raw CLI argument. So an operator running `smking:cache:purge /products/widget/` during an outage would get a "success" message but leave the actual `/products/widget` cache entry stuck for the full 24hr `server_error` TTL.
+
+Fix: extracted `Smking\Laravel\Support\PathNormalizer::canonical()` static helper. Both middleware and purge command now share it. Purge command also surfaces canonicalized path in output when input differed. Regression test: prime cache via `forPath('/products/widget')`, run `cache:purge /products/widget/` (trailing slash), assert canonical entry is gone.
+
+### [medium] `admin*` regression in default `except`
+
+Removing `admin*` from `EXCEPT_PATTERNS` (round-1 fix) was an over-correction. `admin*` is a strong Laravel convention (>90% of installs use exactly that path; Laravel docs and tutorials use it as the canonical example). Unlike business URLs (`/cart` vs `/購物車`), admin path is essentially a framework norm. Removing it for v0.7.0 default would silently expand middleware blast radius into authenticated staff surfaces for every install relying on defaults.
+
+Fix: restored `admin*` in `Defaults::EXCEPT_PATTERNS`. `cart`/`checkout`/`account`/`login`/etc. (truly business-specific) stay in `SUGGESTED_BUSINESS_EXCEPT` opt-in template.
+
+### feat: gradual rollout / A/B documentation
+
+Added README "Gradual rollout / A/B comparison" section walking through `config('smking.only')` whitelist patterns — soft-launch one URL, expand to a section, run an A/B over 2-3 paths against a control. The feature already existed (`only` is checked before `except` in `shouldInject()`), but wasn't documented as a rollout tool.
+
+### Tests added (12 new in this round)
+
+- `test_lock_acquired_on_arraystore_lockprovider` — proves single-flight contention path actually fires
+- `test_default_except_keeps_admin_convention` — regression
+- `test_purge_canonicalizes_trailing_slash_to_match_middleware` — outage-recovery reliability
+- `Tests\Support\PathNormalizerTest` — 9 data-provider cases covering canonical edge cases
+
+109 tests total (was 97).
+
+### Internal
+
+- `AeoClient::supportsLock()` — new private helper using `LockProvider` instanceof
+- `Smking\Laravel\Support\PathNormalizer` — new shared canonicalizer
+
 ## v0.7.0
 
 **Major outage hardening + behavior changes**. Customers must bump composer constraint `^0.6` → `^0.7`.

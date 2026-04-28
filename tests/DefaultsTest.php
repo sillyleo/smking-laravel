@@ -32,6 +32,7 @@ class DefaultsTest extends TestCase
         // SDK must not assume customer URL conventions for business pages.
         // `/cart` / `/account` / `/login` naming varies per site.
         // These belong in SUGGESTED_BUSINESS_EXCEPT for opt-in spread.
+        // (admin* IS retained — see test_default_except_keeps_admin_convention.)
         $businessAssumptions = [
             'cart',
             'checkout',
@@ -39,12 +40,19 @@ class DefaultsTest extends TestCase
             'account/*',
             'login',
             'register',
-            'admin*', // Nova/Filament covered separately; admin is a customer convention
         ];
 
         foreach ($businessAssumptions as $pattern) {
             $this->assertNotContains($pattern, Defaults::EXCEPT_PATTERNS, "EXCEPT_PATTERNS leaked business assumption `{$pattern}` — move to SUGGESTED_BUSINESS_EXCEPT");
         }
+    }
+
+    public function test_default_except_keeps_admin_convention(): void
+    {
+        // admin* was in the v0.6.x baseline. Removing it is a regression
+        // for >90% of Laravel installs (admin is a strong convention,
+        // unlike business-specific cart/checkout naming).
+        $this->assertContains('admin*', Defaults::EXCEPT_PATTERNS);
     }
 
     public function test_suggested_business_except_includes_root_and_wildcard_variants(): void

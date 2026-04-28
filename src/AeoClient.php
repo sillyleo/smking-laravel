@@ -184,7 +184,7 @@ class AeoClient
             $repository->put($cacheKey, $result['body'], $ttl);
         };
 
-        if (! method_exists($repository, 'lock')) {
+        if (! $this->supportsLock($repository)) {
             $result = $resolver();
             $writeResult($result);
 
@@ -290,6 +290,23 @@ class AeoClient
     }
 
     /**
+     * True iff the cache repository's underlying store implements
+     * `LockProvider`. Repository itself doesn't declare lock() — it
+     * routes via `__call` to the store, so checking method_exists on the
+     * Repository wrapper is wrong (always false). Underlying stores that
+     * implement LockProvider: redis, memcached, database, array, file,
+     * dynamodb. The Null / "external" stores don't.
+     */
+    private function supportsLock(\Illuminate\Contracts\Cache\Repository $repository): bool
+    {
+        if (! method_exists($repository, 'getStore')) {
+            return false;
+        }
+
+        return $repository->getStore() instanceof \Illuminate\Contracts\Cache\LockProvider;
+    }
+
+    /**
      * Resolve `cache.connect_timeout` from config; default 1.0s. Floats
      * accepted because Laravel's HTTP client supports sub-second precision.
      */
@@ -388,11 +405,16 @@ class AeoClient
         callable $resolver,
         callable $writer,
     ): AeoResponse {
-        if (! method_exists($repository, 'lock')) {
-            // Cache driver doesn't support locks (file driver in some
-            // versions). Fall back to plain fetch+write — race is possible
-            // but the worst case is N redundant upstream calls (same as
-            // pre-v0.7.0 behavior).
+        // Detect lock support on the *underlying* store. Laravel's
+        // `Repository` wrapper proxies unknown methods to its store via
+        // `__call`, so `method_exists($repository, 'lock')` returns false
+        // even when the configured store (redis / memcached / database /
+        // array / file / dynamodb) does support atomic locks. The right
+        // check is `instanceof LockProvider` against the store itself.
+        if (! $this->supportsLock($repository)) {
+            // No lock support — fall back to plain fetch+write. Race is
+            // possible but worst case is N redundant upstream calls
+            // (same as pre-v0.7.0 behavior).
             $response = $resolver();
             $writer($response);
 
@@ -402,6 +424,8 @@ class AeoClient
         $lockKey = $cacheKey.':lock';
         $lockTtl = max(5, (int) ceil($this->readTimeout() + $this->connectTimeout() + 2));
 
+        // Repository::__call routes lock() to the store, which is fine —
+        // we already gated on supportsLock() above.
         $lock = $repository->lock($lockKey, $lockTtl);
         if (! $lock->get()) {
             // Another worker is already calling upstream. Fail open — return

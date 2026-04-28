@@ -45,9 +45,12 @@ final class Defaults
      *   - cart / checkout / account / profile / login / register / etc.
      *     URL naming for these varies wildly per customer; SDK can't
      *     assume `/cart` over `/購物車` over `/shopping-bag`.
-     *   - Generic `admin*` — many customers use Nova/Filament (covered
-     *     above) or a custom path. Add `'admin*'` yourself if you have a
-     *     hand-rolled admin section at that exact URL.
+     *
+     * Re kept after adversarial review:
+     *   - `admin*` is included — strong Laravel convention (docs and
+     *     >90% of installs use this exact path). Was in the v0.6.x
+     *     baseline; removing it was a regression. If your admin lives
+     *     at a different path, override `except` in your config.
      *
      * @var list<string>
      */
@@ -75,7 +78,8 @@ final class Defaults
         '_ignition*',
         '_debugbar*',
 
-        // Admin dashboard packages with fixed routes
+        // Admin dashboards
+        'admin*',  // strong Laravel convention; restored after v0.7.0 review
         'nova*',
         'filament*',
     ];
