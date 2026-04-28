@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.6.2
+
+**New feature**: middleware now injects a real `<img>` tag in body so SPA-rendered pages have a server-side product image in raw HTML.
+
+### Why
+
+Audits / AI crawlers that grep `<img>` count run against raw HTML before JS hydration. SPA layouts (Vue / React / Inertia) keep product images inside the framework's component tree, so raw HTML often has zero `<img>` until hydration completes — auditUrl reports `imageCount=0` even though the rendered page is image-rich. We were already injecting og:image in `<head>` and `Product.image` in JSON-LD; emitting the corresponding `<img>` in body closes the last gap with zero customer code changes.
+
+### Behavior
+
+- Middleware reads `seo.ogImageUrl` (same source as the `<head>` og:image tag) and emits `<img src="..." alt="..." loading="lazy" data-smking="aeo">` in body.
+- Alt-text fallback chain: `seo.ogTitle` → `seo.title` → `jsonLd.name` → empty.
+- Wrapped by `inject.visibility` (default `sr_only`) so users don't see a duplicate image on top of whatever the SPA renders. The DOM still has the tag — `cheerio.find('img')` and AI bots that grep `<img>` both pick it up.
+- New flag `inject.image_html` (default `true`) — set `false` to disable just the body img while keeping og:image in `<head>`.
+
+### Tests added
+
+- `test_injects_img_tag_when_og_image_present`
+- `test_img_alt_falls_back_through_seo_title_then_jsonld_name`
+- `test_no_img_when_og_image_missing`
+- `test_inject_image_html_false_disables`
+- `test_img_visible_when_visibility_visible`
+
+76 tests total (was 71).
+
+### Internal
+
+- `InjectAeo::resolveImageAlt()` — new private helper.
+
 ## v0.6.1
 
 **Patch**: gate the markdown alternate `Link` header (v0.5.0+) on env presence.

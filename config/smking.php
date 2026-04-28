@@ -157,6 +157,14 @@ return [
         // place it explicitly in your layout, the assumption is you want
         // it visible.
         'visibility' => env('SMKING_INJECT_VISIBILITY', 'sr_only'),
+
+        // Image tag injection (v0.6.2+). Inject a real `<img>` in body so
+        // raw HTML has a product image — fixes SPA-site auditors (and AI
+        // crawlers that grep `<img>` tags) reporting imageCount=0 when
+        // the framework hasn't hydrated yet. Same source as og:image. The
+        // tag is wrapped by `inject.visibility` (default sr_only), so it's
+        // not visible to users on top of whatever the SPA renders.
+        'image_html' => true,
     ],
 
     /*

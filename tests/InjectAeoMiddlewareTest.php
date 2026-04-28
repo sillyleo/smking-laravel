@@ -936,6 +936,136 @@ class InjectAeoMiddlewareTest extends TestCase
         $this->assertSame(1, $count, 'Should not duplicate markdown alternate when customer already advertises one');
     }
 
+    // ── Product <img> injection (v0.6.2) ──────────────────────────
+
+    public function test_injects_img_tag_when_og_image_present(): void
+    {
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'seo' => [
+                    'ogTitle' => 'Blue Widget',
+                    'ogImageUrl' => 'https://cdn.example.com/widget.jpg',
+                ],
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response('<html><head></head><body>x</body></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        $html = (string) $response->getContent();
+
+        $this->assertStringContainsString('<img src="https://cdn.example.com/widget.jpg"', $html);
+        $this->assertStringContainsString('alt="Blue Widget"', $html);
+        $this->assertStringContainsString('loading="lazy"', $html);
+        $this->assertStringContainsString('data-smking="aeo"', $html);
+        // Wrapped in sr-only by default — user never sees it
+        $this->assertStringContainsString('clip:rect(0,0,0,0)', $html);
+    }
+
+    public function test_img_alt_falls_back_through_seo_title_then_jsonld_name(): void
+    {
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'jsonLd' => ['@type' => 'Product', 'name' => 'JSON-LD Name'],
+                'seo' => [
+                    'title' => 'SEO Title',
+                    'ogImageUrl' => 'https://cdn.example.com/x.jpg',
+                    // ogTitle missing → falls back to title
+                ],
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/p', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response('<html><head></head><body>x</body></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        $this->assertStringContainsString('alt="SEO Title"', (string) $response->getContent());
+    }
+
+    public function test_no_img_when_og_image_missing(): void
+    {
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'seo' => ['title' => 'X'], // no ogImageUrl
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/p', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response('<html><head></head><body>x</body></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        $this->assertStringNotContainsString('data-smking="aeo"></img>', (string) $response->getContent());
+        $this->assertStringNotContainsString('<img ', (string) $response->getContent());
+    }
+
+    public function test_inject_image_html_false_disables(): void
+    {
+        config()->set('smking.inject.image_html', false);
+
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'seo' => [
+                    'ogTitle' => 'X',
+                    'ogImageUrl' => 'https://cdn.example.com/x.jpg',
+                ],
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/p', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response('<html><head></head><body>x</body></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        // og:image meta still injected in <head> (controlled separately)
+        $this->assertStringContainsString('<meta property="og:image"', (string) $response->getContent());
+        // But no <img> in body
+        $this->assertStringNotContainsString('<img ', (string) $response->getContent());
+    }
+
+    public function test_img_visible_when_visibility_visible(): void
+    {
+        config()->set('smking.inject.visibility', 'visible');
+
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'seo' => [
+                    'ogTitle' => 'X',
+                    'ogImageUrl' => 'https://cdn.example.com/x.jpg',
+                ],
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/p', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response('<html><head></head><body>x</body></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        $html = (string) $response->getContent();
+
+        // Visible mode means raw, no clip-rect wrapper
+        $this->assertStringContainsString('<img src="https://cdn.example.com/x.jpg"', $html);
+        $this->assertStringNotContainsString('clip:rect(0,0,0,0)', $html);
+    }
+
     // ── Body-fragment visibility (v0.6.0) ─────────────────────────
 
     public function test_body_fragments_default_to_sr_only_wrapper(): void

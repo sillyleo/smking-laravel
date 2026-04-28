@@ -272,10 +272,46 @@ class InjectAeo
             $bodyFragments[] = $aeo->faqHtml;
         }
 
+        // v0.6.2: inject <img> for product image so SPA layouts get a real
+        // <img> tag in raw HTML — auditUrl's `imageCount` heuristic + AI
+        // crawlers that grep <img> tags both pick it up. Wrapped via the
+        // sr-only visibility wrapper alongside summary / faq so users
+        // never see it. Source: same ogImageUrl already injected in <head>.
+        if (($flags['image_html'] ?? true) && $aeo->seo?->ogImageUrl !== null) {
+            $alt = $this->resolveImageAlt($aeo);
+            $bodyFragments[] = sprintf(
+                '<img src="%s" alt="%s" loading="lazy" data-smking="aeo">',
+                e($aeo->seo->ogImageUrl),
+                e($alt),
+            );
+        }
+
         $html = $this->injectBefore($html, '</head>', implode('', $headFragments));
         $html = $this->injectBefore($html, '</body>', $this->wrapByVisibility(implode('', $bodyFragments)));
 
         return $html;
+    }
+
+    /**
+     * Choose the best alt text for the injected product <img>:
+     *   1. seo.ogTitle (most descriptive — meant for social cards)
+     *   2. seo.title (page title)
+     *   3. jsonLd Product.name
+     *   4. empty (decorative — at least valid HTML)
+     */
+    private function resolveImageAlt(AeoResponse $aeo): string
+    {
+        if ($aeo->seo?->ogTitle !== null && $aeo->seo->ogTitle !== '') {
+            return $aeo->seo->ogTitle;
+        }
+        if ($aeo->seo?->title !== null && $aeo->seo->title !== '') {
+            return $aeo->seo->title;
+        }
+        if (is_array($aeo->jsonLd) && isset($aeo->jsonLd['name']) && is_string($aeo->jsonLd['name'])) {
+            return $aeo->jsonLd['name'];
+        }
+
+        return '';
     }
 
     /**
