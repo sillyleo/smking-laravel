@@ -267,9 +267,46 @@ class InjectAeo
         }
 
         $html = $this->injectBefore($html, '</head>', implode('', $headFragments));
-        $html = $this->injectBefore($html, '</body>', implode('', $bodyFragments));
+        $html = $this->injectBefore($html, '</body>', $this->wrapByVisibility(implode('', $bodyFragments)));
 
         return $html;
+    }
+
+    /**
+     * Wrap body fragments according to `inject.visibility` (v0.6.0+).
+     *
+     * Why default `sr_only`: prior versions (≤ v0.5.x) injected raw HTML
+     * fragments before `</body>`, which meant the markup landed *outside*
+     * the SPA's mount target (`#app`) on Vue / React layouts and rendered
+     * as visible unstyled text — both as a FOUC during initial paint and
+     * as permanent DOM that the framework never claimed. sr_only with an
+     * inline-style wrapper hides the fragments visually while keeping the
+     * microdata in the DOM as a backup signal for Googlebot. JSON-LD in
+     * `<head>` remains the primary AEO signal regardless.
+     *
+     *   sr_only  — inline-style wrapper (W3C visually-hidden pattern).
+     *              Default. SPA-safe, Googlebot reads microdata, AI bots
+     *              read JSON-LD from <head>.
+     *   visible  — raw fragments (v0.5 behavior). For SSR-only article
+     *              sites that genuinely want a no-JS user fallback.
+     *   noscript — wraps in <noscript>. Provided but not recommended:
+     *              GPTBot skips noscript trees, PerplexityBot is
+     *              inconsistent. Visible only when JS is disabled.
+     */
+    private function wrapByVisibility(string $fragments): string
+    {
+        if ($fragments === '') {
+            return '';
+        }
+
+        $mode = (string) $this->config->get('smking.inject.visibility', 'sr_only');
+
+        return match ($mode) {
+            'visible' => $fragments,
+            'noscript' => '<noscript data-smking="aeo">'.$fragments.'</noscript>',
+            // sr_only and any unknown value fall through to the safe default.
+            default => '<div data-smking="aeo" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0">'.$fragments.'</div>',
+        };
     }
 
     private function injectDevComment(string $html, string $status, string $path, string $url): string

@@ -137,6 +137,26 @@ return [
         // always serve HTML regardless of Accept — useful if you want to
         // wire your own content negotiation in a controller.
         'markdown' => true,
+
+        // Body-fragment visibility (v0.6.0+). Auto-injected summary / FAQ
+        // HTML lands before </body>, which on SPA layouts (Vue / React /
+        // Inertia with #app mount target) ends up *outside* the framework's
+        // root, rendering as visible unstyled text both during FOUC and
+        // permanently after mount. sr_only wraps the fragments in an
+        // inline-style visually-hidden container so the microdata stays
+        // in the DOM (Googlebot reads it) while users see nothing extra.
+        // JSON-LD in <head> is unaffected and remains the primary AEO
+        // signal for AI crawlers.
+        //
+        //   'sr_only'  — visually hidden via inline style (default; SPA-safe)
+        //   'visible'  — raw fragments (v0.5.x behavior; SSR / article sites)
+        //   'noscript' — wrap in <noscript> (provided but not recommended;
+        //                GPTBot skips noscript, PerplexityBot inconsistent)
+        //
+        // The <x-smking-aeo /> Blade component is unaffected — when you
+        // place it explicitly in your layout, the assumption is you want
+        // it visible.
+        'visibility' => env('SMKING_INJECT_VISIBILITY', 'sr_only'),
     ],
 
     /*
