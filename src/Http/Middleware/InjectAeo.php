@@ -55,7 +55,13 @@ class InjectAeo
             return $response;
         }
 
-        $aeo = $this->client->forPath($path, $request->fullUrl());
+        // v0.7.3: pass `$request->url()` (no query string) instead of
+        // `fullUrl()`. The backend only needs the canonical URL to crawl;
+        // query string is visitor state (utm_*, fbclid, affiliate, session
+        // tokens) and shipping it third-party is a privacy leak with zero
+        // upstream value. Same for the markdown alternate Link header and
+        // canonical/og:url rewrites below.
+        $aeo = $this->client->forPath($path, $request->url());
         $this->emitHeaders($response, $aeo->status, $path);
 
         // Markdown for Agents (RFC-style content negotiation, v0.4.0+).
@@ -86,7 +92,7 @@ class InjectAeo
         // the actual md API call will fail and the agent gets HTML back.
         // Better to stay silent until config is in place.
         if (($flags['markdown'] ?? true) && $this->isConfigured()) {
-            $this->addMarkdownAlternateLink($response, $request->fullUrl());
+            $this->addMarkdownAlternateLink($response, $request->url());
         }
 
         // If the response body is already encoded (gzip / br / deflate) we
@@ -118,7 +124,7 @@ class InjectAeo
             return $response;
         }
 
-        $rewritten = $this->rewriteHtml($content, $aeo, $path, $request->fullUrl());
+        $rewritten = $this->rewriteHtml($content, $aeo, $path, $request->url());
 
         if ($rewritten === $content) {
             return $response;
@@ -136,6 +142,16 @@ class InjectAeo
 
     private function shouldInject(Request $request, Response $response): bool
     {
+        // v0.7.3: phpunit / Pest auto-skip. Customer feature tests
+        // (`->get('/foo')`) hit our middleware → backend POST → 2.5s
+        // timeout when there's no real upstream in CI / local test runs.
+        // Flip `smking.inject_in_tests` to true (or set
+        // `SMKING_INJECT_IN_TESTS=true` in `.env.testing`) for integration
+        // tests that genuinely want the full pipeline.
+        if (app()->runningUnitTests() && ! (bool) $this->config->get('smking.inject_in_tests', false)) {
+            return false;
+        }
+
         // Accept GET *and* HEAD — HEAD is GET-without-body in HTTP semantics,
         // and `curl -I` is the canonical install-verification command. Laravel
         // dispatches HEAD to the same controller as GET; here we let it

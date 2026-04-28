@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.7.3 — phpunit auto-skip + URL query-string privacy
+
+Two real defects surfaced by a customer install audit on the sleepytofu.com Laravel project. Both are SDK-side responsibility, both shipped as a single patch.
+
+### fix(test): middleware short-circuits in `phpunit` / Pest by default
+
+Customer `php artisan test` runs hit the SDK middleware on every feature test that issues `->get('/foo')`. Without a reachable backend (CI, offline dev), each test timed out 2.5s against `localhost` before failing open — turning a 2-second suite into minutes of flaky red. The `SMKING_AUTO_INJECT=false` env var has always existed as the opt-out, but expecting customers to discover it on their first `composer require` is the wrong default.
+
+`InjectAeo::shouldInject()` now returns false when `app()->runningUnitTests()` is true, unless the new `smking.inject_in_tests` config (env: `SMKING_INJECT_IN_TESTS`) is flipped on. Customers running real integration tests against a staging backend opt in via `.env.testing`:
+
+```dotenv
+SMKING_INJECT_IN_TESTS=true
+```
+
+Detection uses `runningUnitTests()` rather than `environment('testing')` so Pest, phpunit, and paratest all benefit, even when the customer's `APP_ENV` value diverges from the conventional `testing`.
+
+The SDK's own test suite (130 existing tests across `InjectAeoMiddlewareTest` etc.) explicitly sets `smking.inject_in_tests = true` in `Tests\TestCase::defineEnvironment()` so existing middleware coverage is preserved.
+
+### fix(privacy): backend-bound URL no longer carries query string
+
+Three call sites in `InjectAeo::handle()` previously passed `$request->fullUrl()` to the smking backend (`/api/v1/public/aeo`) and into the markdown alternate `Link` header / canonical rewrite. `fullUrl()` includes the query string — so utm parameters, `fbclid`, `gclid`, affiliate refs, session tokens, and any campaign metadata in the visitor's URL was shipped third-party on every page render. Real-world impact on a campaign-tagged WooCommerce / Magento installation: every product-page hit emits a unique URL to our logs, leaking the customer's marketing attribution data with no upstream value (the backend only uses the URL to crawl the canonical page; query string is visitor state, not content state).
+
+All three call sites switched to `$request->url()` — same scheme + host + path, query string stripped at the edge before any network call.
+
+There is currently no opt-in to send query string back. If a customer genuinely needs query-distinct content discovery (rare for AEO), open an issue and we'll add a config knob.
+
+### Tests added (3 new)
+
+- `test_middleware_short_circuits_in_unit_test_env_by_default` — vanilla customer phpunit run with `inject_in_tests=false` makes ZERO backend calls and emits no headers / body markup
+- `test_middleware_runs_in_test_env_when_inject_in_tests_opted_in` — sanity check that the opt-in undoes the short-circuit (the SDK's own suite relies on this)
+- `test_url_sent_to_backend_strips_query_string` — request with `?utm_source=fb&affiliate=xyz&fbclid=abc` results in a backend POST whose `url` field is the canonical URL only
+
+133 tests total (was 130).
+
+### Internal
+
+- `config/smking.php` — new `inject_in_tests` knob, default false
+- `src/Http/Middleware/InjectAeo.php` — `shouldInject()` adds the test-env short-circuit at the top; lines 58 / 89 / 121 swap `fullUrl()` → `url()`; one inline comment block on the privacy rationale so the next refactor doesn't undo it
+- `tests/TestCase.php::defineEnvironment()` — opts the SDK suite into the middleware path
+
 ## v0.7.2 — config inline doc for `only` whitelist
 
 Pure-doc patch. The `'only'` whitelist feature has been around since v0.1, but customers asked "where do I configure path whitelisting?" enough times that it became clear `config/smking.php` wasn't surfacing it well — the published config had a 4-line stub with two commented examples and no explanation, so customers reading it cold either missed the feature or had to dig into the package README to understand what the array meant.

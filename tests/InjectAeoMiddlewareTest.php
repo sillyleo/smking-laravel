@@ -1235,6 +1235,102 @@ class InjectAeoMiddlewareTest extends TestCase
         $this->assertStringNotContainsString('text/markdown', (string) $response->headers->get('Link', ''));
     }
 
+    // ── v0.7.3: test-env short-circuit + URL privacy ────────────────
+
+    public function test_middleware_short_circuits_in_unit_test_env_by_default(): void
+    {
+        // Customer running `php artisan test` shouldn't have feature
+        // tests time out against an unreachable backend. The opt-in
+        // `inject_in_tests` is true in our SDK suite (so existing
+        // middleware tests still work) — flip it off here to simulate
+        // a vanilla customer test run.
+        config()->set('smking.inject_in_tests', false);
+
+        Http::fake(); // any backend call would be intercepted, but expect ZERO
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        Http::assertNothingSent();
+        $this->assertNull(
+            $response->headers->get('X-Smking-Status'),
+            'middleware must fully short-circuit in test env when inject_in_tests=false',
+        );
+        $this->assertStringNotContainsString(
+            'data-smking-injected',
+            (string) $response->getContent(),
+            'no body rewrite when short-circuited',
+        );
+    }
+
+    public function test_middleware_runs_in_test_env_when_inject_in_tests_opted_in(): void
+    {
+        // Sanity: the opt-in actually does undo the short-circuit.
+        // (TestCase already sets this true — explicit re-set documents
+        // the contract.)
+        config()->set('smking.inject_in_tests', true);
+
+        Http::fake([
+            '*' => Http::response(['status' => 'ready'], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $this->assertSame('ready', $response->headers->get('X-Smking-Status'));
+        Http::assertSentCount(1);
+    }
+
+    public function test_url_sent_to_backend_strips_query_string(): void
+    {
+        // Privacy: utm_*, fbclid, gclid, affiliate, session tokens must
+        // not be shipped to the smking backend. We use $request->url()
+        // (canonical) instead of $request->fullUrl() (which preserves
+        // the query string).
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response(['status' => 'ready'], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create(
+            'http://shop.example/products/widget?utm_source=fb&utm_campaign=spring2026&affiliate=xyz123&fbclid=abc',
+            'GET',
+        );
+        $middleware->handle($request, function () {
+            return new Response(
+                '<html><head></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        Http::assertSent(function ($request) {
+            $sentUrl = (string) ($request['url'] ?? '');
+
+            return $sentUrl === 'http://shop.example/products/widget'
+                && ! str_contains($sentUrl, 'utm_')
+                && ! str_contains($sentUrl, 'fbclid')
+                && ! str_contains($sentUrl, 'affiliate');
+        });
+    }
+
     public function test_link_header_not_emitted_on_markdown_response(): void
     {
         Http::fake([
