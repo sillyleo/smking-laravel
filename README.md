@@ -100,6 +100,7 @@ The `<x-smking-meta />` component mirrors `getSmkingMetadata()` from `@smking/ne
 | `auto_inject` | `true` | Register middleware globally |
 | `only` / `except` | see file | Path filters (Laravel wildcard) |
 | `inject.*` | all `true` | Toggle json_ld / meta_description / faq / summary / seo_title / og_title / og_description / og_image / canonical / markdown |
+| `inject.visibility` | `sr_only` | Body-fragment visibility: `sr_only` (default, visually hidden), `visible` (raw, v0.5.x behavior), `noscript` |
 | `cache.ttl` | `3600` | Seconds; `0` disables |
 | `timeout` | `3` | HTTP timeout in seconds |
 
@@ -113,6 +114,7 @@ The `<x-smking-meta />` component mirrors `getSmkingMetadata()` from `@smking/ne
 6. Responses are cached per path in Laravel's cache. Pending/error states fail open.
 7. **Agent content negotiation** (v0.4.0+): when `Accept: text/markdown` is preferred over `text/html` (q-value-aware), the middleware fetches `/api/v1/public/md` and replaces the body with markdown. `Vary: Accept` is added so caches stay consistent. First-time misses fall through to HTML and trigger the same background crawl.
 8. **Agent discovery** (v0.5.0+): every HTML response advertises the markdown alternate via `Link: <{url}>; rel="alternate"; type="text/markdown"` (RFC 8288). Appended to any existing Link headers; idempotent if you already wired your own.
+9. **Visually-hidden body fragments by default** (v0.6.0+): auto-injected `summaryHtml` / `faqHtml` are wrapped in an inline-style sr-only `<div>` so they don't pollute SPA layouts where `</body>` injection lands outside `#app`. Microdata stays in the DOM (Googlebot reads it); JSON-LD in `<head>` is the primary AEO signal. Switch with `SMKING_INJECT_VISIBILITY=visible` if you want the v0.5.x behavior. The `<x-smking-aeo />` Blade component is unaffected — explicit placement is always rendered as you wrote it.
 
 ## Requirements
 

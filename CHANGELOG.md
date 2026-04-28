@@ -1,5 +1,53 @@
 # Changelog
 
+## v0.6.0
+
+**Visual change**: middleware-injected `summaryHtml` / `faqHtml` body fragments default to **visually hidden** (sr-only inline-style wrapper). The DOM still contains the microdata; the user no longer sees an unstyled section at the bottom of the page.
+
+### Why
+
+Reported in [issue #1](https://github.com/sillyleo/smking-laravel/issues/1) — on Laravel + Vue / React / Inertia SPA layouts, the `</body>`-prefixed body fragments land **outside** the framework's mount target (`#app`). Result:
+
+1. **FOUC**: first paint shows only the unstyled `<section class="smking-summary">` block, because the SPA hasn't compiled `#app` yet.
+2. **Permanent visible markup**: even after mount, the section sits permanently in the DOM at body-end as plain unstyled text — duplicating content the customer already designed in their Vue / React FAQ component.
+3. **Conflicts with "no-touch" install philosophy**: middleware silently inserting visible markup into the customer's page is functionally equivalent to editing their Blade.
+
+JSON-LD in `<head>` already covers all major AI crawlers (ChatGPT, Perplexity, Claude, Google AI Mode) — the body microdata is only needed as a Googlebot backup signal, where visibility is irrelevant for parsing.
+
+### Behavior
+
+`config('smking.inject.visibility')` (new, default `'sr_only'`):
+
+| Mode | Wrapper | When to use |
+|------|---------|-------------|
+| `sr_only` (default) | inline-style visually-hidden `<div>` (W3C clip-rect pattern) | SPA / customers with their own FAQ design — DOM has microdata, screen invisible |
+| `visible` | none — raw fragments (v0.5.x behavior) | SSR-only article sites that genuinely want a no-JS user fallback |
+| `noscript` | `<noscript data-smking="aeo">` | Only if you specifically want the fragments visible **only** when JS is disabled. **Not recommended**: GPTBot skips `<noscript>` trees, PerplexityBot is inconsistent. |
+
+Unknown values fall back to `sr_only` — defensive, never leaks raw fragments.
+
+The `<x-smking-aeo />` Blade component is **unaffected**. When you place that component explicitly in your layout, the assumption is you want it visible — visibility config only governs the auto-inject path.
+
+### Migration
+
+- **Most installs need no change.** v0.5 behavior already had the bug this fixes; the default switch is the fix.
+- If you genuinely depended on the visible body fragments (rare — pure SSR article site that wanted SDK-rendered FAQ visible), set `SMKING_INJECT_VISIBILITY=visible` in `.env`.
+- Composer constraint bump required: `^0.5` → `^0.6` (caret 0.x treats minor as breaking).
+
+### Tests added
+
+- `test_body_fragments_default_to_sr_only_wrapper` — default wraps in inline-style div with microdata preserved
+- `test_visibility_visible_emits_raw_fragments_without_wrapper` — opt-in legacy behavior
+- `test_visibility_noscript_wraps_fragments_in_noscript_tag` — opt-in noscript mode
+- `test_unknown_visibility_value_falls_back_to_sr_only` — defensive default
+- `test_no_wrapper_emitted_when_no_body_fragments` — empty fragments don't leave an empty wrapper div
+
+69 tests total (was 64).
+
+### Internal
+
+- `InjectAeo::wrapByVisibility()` — new private helper (PHP `match` over the three modes).
+
 ## v0.5.0
 
 **New feature**: `Link: rel="alternate"; type="text/markdown"` response header — agent discovery for the v0.4.0 markdown rendition.

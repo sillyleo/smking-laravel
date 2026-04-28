@@ -936,6 +936,140 @@ class InjectAeoMiddlewareTest extends TestCase
         $this->assertSame(1, $count, 'Should not duplicate markdown alternate when customer already advertises one');
     }
 
+    // ── Body-fragment visibility (v0.6.0) ─────────────────────────
+
+    public function test_body_fragments_default_to_sr_only_wrapper(): void
+    {
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'summaryHtml' => '<section class="smking-summary">SUM</section>',
+                'faqHtml' => '<section class="smking-faq">FAQ</section>',
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response('<html><head></head><body>x</body></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        $html = (string) $response->getContent();
+
+        // Wrapped in inline-style visually-hidden div
+        $this->assertStringContainsString('data-smking="aeo"', $html);
+        $this->assertStringContainsString('clip:rect(0,0,0,0)', $html);
+        $this->assertStringContainsString('position:absolute', $html);
+        // Inner microdata still present for Googlebot
+        $this->assertStringContainsString('smking-summary', $html);
+        $this->assertStringContainsString('smking-faq', $html);
+        // Wrapper sits inside body before </body>
+        $this->assertMatchesRegularExpression('/<div data-smking="aeo".+<\/div>\s*<\/body>/s', $html);
+    }
+
+    public function test_visibility_visible_emits_raw_fragments_without_wrapper(): void
+    {
+        config()->set('smking.inject.visibility', 'visible');
+
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'summaryHtml' => '<section class="smking-summary">SUM</section>',
+                'faqHtml' => '<section class="smking-faq">FAQ</section>',
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response('<html><head></head><body>x</body></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        $html = (string) $response->getContent();
+
+        // No wrapper around the fragments themselves
+        $this->assertStringNotContainsString('clip:rect(0,0,0,0)', $html);
+        // smking-summary / smking-faq sit directly in body
+        $this->assertStringContainsString('<section class="smking-summary">SUM</section>', $html);
+        $this->assertStringContainsString('<section class="smking-faq">FAQ</section>', $html);
+    }
+
+    public function test_visibility_noscript_wraps_fragments_in_noscript_tag(): void
+    {
+        config()->set('smking.inject.visibility', 'noscript');
+
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'summaryHtml' => '<section class="smking-summary">SUM</section>',
+                'faqHtml' => '<section class="smking-faq">FAQ</section>',
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response('<html><head></head><body>x</body></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        $html = (string) $response->getContent();
+
+        $this->assertMatchesRegularExpression('/<noscript[^>]*data-smking="aeo"[^>]*>.*<\/noscript>/s', $html);
+        $this->assertStringContainsString('smking-summary', $html);
+    }
+
+    public function test_unknown_visibility_value_falls_back_to_sr_only(): void
+    {
+        config()->set('smking.inject.visibility', 'totally-bogus');
+
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'summaryHtml' => '<section>SUM</section>',
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/x', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response('<html><head></head><body>x</body></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        // Unknown value MUST NOT leak raw fragments — the safe default wins.
+        $this->assertStringContainsString('clip:rect(0,0,0,0)', (string) $response->getContent());
+    }
+
+    public function test_no_wrapper_emitted_when_no_body_fragments(): void
+    {
+        // ready response with only json_ld + meta (no summaryHtml / faqHtml)
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'jsonLd' => ['@type' => 'Product', 'name' => 'X'],
+                'metaDescription' => 'Buy X.',
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/x', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response('<html><head></head><body>real content</body></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        $html = (string) $response->getContent();
+
+        // No empty visually-hidden div polluting the body
+        $this->assertStringNotContainsString('clip:rect(0,0,0,0)', $html);
+        $this->assertStringNotContainsString('<noscript data-smking', $html);
+        // But head injection still happened
+        $this->assertStringContainsString('application/ld+json', $html);
+    }
+
     public function test_link_header_not_emitted_on_markdown_response(): void
     {
         Http::fake([
