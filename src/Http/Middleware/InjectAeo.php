@@ -9,6 +9,7 @@ use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Http\Request;
 use Smking\Laravel\AeoClient;
 use Smking\Laravel\Data\AeoResponse;
+use Smking\Laravel\Support\PathNormalizer;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
@@ -179,9 +180,11 @@ class InjectAeo
 
     private function normalizePath(Request $request): string
     {
-        $path = '/'.ltrim($request->path(), '/');
-
-        return $path === '/' ? '/' : rtrim($path, '/');
+        // Delegate to the shared canonicalizer so the cache:purge command
+        // agrees on the cache key shape for a given URL. If these two
+        // diverge, an operator running `smking:cache:purge /x/` can leave
+        // the real entry (`/x`) stuck for the full server_error TTL.
+        return PathNormalizer::canonical($request->path());
     }
 
     private function emitHeaders(Response $response, string $status, string $path): void

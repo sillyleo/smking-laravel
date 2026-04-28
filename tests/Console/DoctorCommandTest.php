@@ -118,4 +118,72 @@ class DoctorCommandTest extends TestCase
 
         $this->assertSame(0, $exit);
     }
+
+    // ── Config schema drift check (v0.6.3) ────────────────────────
+
+    public function test_doctor_reports_missing_keys_when_published_config_lags(): void
+    {
+        $configPath = config_path('smking.php');
+        file_put_contents($configPath, "<?php return ['api_key' => 'pk_x', 'base_url' => 'https://api.test'];");
+
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response([], 400),
+        ]);
+
+        $output = new \Symfony\Component\Console\Output\BufferedOutput();
+        \Illuminate\Support\Facades\Artisan::call('smking:doctor', [], $output);
+        $display = $output->fetch();
+
+        $this->assertStringContainsString('Config schema drift', $display);
+        $this->assertStringContainsString('new key(s)', $display);
+    }
+
+    public function test_doctor_reports_in_sync_when_published_config_matches_package(): void
+    {
+        // Copy the package's config verbatim into the user config — no drift.
+        $packageConfig = file_get_contents(__DIR__.'/../../config/smking.php');
+        file_put_contents(config_path('smking.php'), $packageConfig);
+
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response([], 400),
+        ]);
+
+        $output = new \Symfony\Component\Console\Output\BufferedOutput();
+        \Illuminate\Support\Facades\Artisan::call('smking:doctor', [], $output);
+
+        $this->assertStringContainsString('in sync with package defaults', $output->fetch());
+    }
+
+    public function test_doctor_drift_check_is_info_only_never_fails(): void
+    {
+        // Even with major drift, the doctor must still exit 0 if other
+        // hard checks pass. Drift is informational, not a failure.
+        $configPath = config_path('smking.php');
+        file_put_contents($configPath, "<?php return [];"); // empty — every package key is "missing"
+
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response([], 400),
+        ]);
+
+        $exit = $this->artisan('smking:doctor')->run();
+
+        $this->assertSame(0, $exit);
+    }
+
+    public function test_doctor_drift_check_skips_when_config_not_published(): void
+    {
+        $configPath = config_path('smking.php');
+        if (file_exists($configPath)) {
+            @unlink($configPath);
+        }
+
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response([], 400),
+        ]);
+
+        $output = new \Symfony\Component\Console\Output\BufferedOutput();
+        \Illuminate\Support\Facades\Artisan::call('smking:doctor', [], $output);
+
+        $this->assertStringContainsString('drift check skipped', $output->fetch());
+    }
 }

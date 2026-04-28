@@ -1,5 +1,321 @@
 # Changelog
 
+## v0.7.0 — pre-release adversarial review fixes (round 4)
+
+Fourth adversarial review (codex, requested against the explicit recommendation to stop at round 3) caught three real issues that the round-3 cuts didn't cover: cross-surface coupling, recovery-flow false advertising, and a first-launch regression on the new miss TTL default. All folded into v0.7.0 before tagging.
+
+### [high] Per-surface circuit breaker — markdown failure no longer suppresses HTML AEO
+
+The round-3 breaker was a single `smking:circuit:{ns}` flag shared by `forPath()` (HTML AEO injection, every page render) and `getMarkdown()` (agent-only optional surface for `Accept: text/markdown` clients). A markdown 5xx would short-circuit HTML injection for the full breaker TTL — wrong trust boundary: an outage on an optional agent endpoint should not affect the customer-facing HTML path.
+
+Round-4 splits the breaker key per upstream surface:
+
+- HTML AEO uses `smking:circuit:aeo:{ns}`
+- Markdown uses `smking:circuit:md:{ns}`
+
+Each surface trips and recovers independently. Both still rotate with `(api_key, base_url)` and respect the same `SMKING_CIRCUIT_BREAKER` / `SMKING_CIRCUIT_BREAKER_TTL` knobs.
+
+### [medium] `smking:cache:purge` now actually forces a retry while the breaker is open
+
+The round-3 docstring told operators that `cache:purge` is the recovery path after an outage and that "next request re-fetches". In reality the command only forgot per-path AEO + markdown entries — it never touched the namespace breaker, so a purge issued during the breaker TTL window left subsequent requests short-circuiting `server_error` until the breaker expired.
+
+Round-4 makes purge clear the per-surface breaker keys alongside the path/product-id entries:
+
+- `cache:purge <path>` clears `circuit_aeo` + `circuit_md` (path may be hit by either surface next).
+- `cache:purge --product-id=N` clears `circuit_aeo` (product_id never flows through markdown).
+
+Auto-recovery still rate-limits via the breaker; purge is the explicit manual override that says "retry now".
+
+### [medium] Restored short `not_found_ttl` default — first-launch products become visible within ~1 minute
+
+Round-1..3 raised the `not_found_ttl` default from 30s to 900s (15 minutes) to absorb worker-pool stampede on million-PV sites. But `forPath()` uses POST specifically to register unseen paths for background crawling — the typical lifecycle is "first request → register → ready in 1-2 minutes". A 900s default cached the first miss for 15 minutes, masking the ready transition; the SDK kept returning `no content` long after the crawl/generate job finished, breaking fresh product launches.
+
+Round-4 restores the default to 60s. Stampede protection is already covered by:
+
+- `pending_ttl` (15s) when the SaaS sends an explicit 202 in-progress signal,
+- `circuit_breaker` (60s) for namespace-wide outage short-circuiting.
+
+`not_found` is a 4xx — the SaaS explicitly says "no content for this path", not an outage signal. 60s gives 1-minute recovery on first-launch products and still caps worker stampede to one upstream call per minute per cold path. Customers who want a longer cushion can still set `SMKING_NOT_FOUND_TTL` higher.
+
+### Tests added (5 new in this round)
+
+- `test_markdown_failure_does_not_trip_html_aeo_circuit` — proves surface isolation forward direction
+- `test_html_aeo_failure_does_not_trip_markdown_circuit` — proves surface isolation reverse direction
+- `test_circuit_breaker_keys_are_isolated_per_surface_in_cache` — direct cache-key assertion that AEO failures only set the AEO breaker
+- `test_purge_by_path_clears_both_surface_circuit_keys` — purge actually unblocks recovery
+- `test_purge_by_product_id_clears_aeo_circuit_key` — product-id purge clears the relevant breaker
+
+119 tests total (was 114).
+
+### Internal
+
+- `AeoClient::circuitKey()` / `circuitOpen()` / `tripCircuit()` now take a `'aeo' | 'md'` surface argument.
+- `AeoClient::cacheKeyPrefixes()` returns `circuit_aeo` and `circuit_md` keys for the cache-purge command.
+- `CachePurgeCommand` output now includes a `circuit → cleared` line so the operator sees the breaker state was reset.
+
+## v0.7.0 — pre-release adversarial review fixes (round 3)
+
+Third adversarial review caught the missing pieces between per-path protection and namespace-wide protection. All folded into v0.7.0 before tagging.
+
+### [high] Namespace-wide circuit breaker — protects against high-cardinality outages
+
+Per-path 24hr `server_error` cache only protects keys we've already failed. A high-cardinality outage (catalog spray, full-site crawler, sitemap fetch when SaaS is down) would still consume one full timeout per distinct URL — the second URL in the burst doesn't know the first one just failed.
+
+v0.7.0 round-3 adds a namespace-wide circuit breaker keyed by `(api_key, base_url)`:
+
+- Any path's first 5xx / transport failure trips a `smking:circuit:*` cache flag (default 60s TTL).
+- While the flag is present, ALL `forPath()` / `getMarkdown()` calls short-circuit with `server_error` WITHOUT touching the upstream.
+- Auto half-open: when the flag expires, the next request hits upstream — success keeps the breaker closed; another failure trips it again.
+
+Two new env knobs (default sensible):
+
+```dotenv
+SMKING_CIRCUIT_BREAKER=true       # set false to disable
+SMKING_CIRCUIT_BREAKER_TTL=60     # seconds
+```
+
+Combined with per-path `server_error` cache and single-flight: under a million-PV outage scenario, **only the first request to any path** in a 60-second window touches the upstream. Per-path cache then protects already-failed paths for 24 hours.
+
+### [high] Cache `pending` status (default 15s) — kills hot-URL polling
+
+`pending` (202 from SaaS, backlog still crawling) was previously not cached at all — single-flight only suppressed concurrent overlap, but as soon as one request returned `pending` the next request immediately tried upstream. A newly launched URL with even modest traffic could generate hundreds of redundant calls per minute against the crawler queue.
+
+v0.7.0 round-3 adds `cache.pending_ttl` (default 15s, configurable via `SMKING_PENDING_TTL`). Pending now joins the four-tier TTL match alongside ready / not_found / server_error.
+
+### [medium] `cache:purge --product-id=N` — recovery for WC product surface
+
+`forProductId()` (used by `Smking::forProductId()` facade and the legacy WC flow) caches under `product_id=N` keys, completely separate from `path=...` keys. Pre-round-3 the only way to invalidate those entries was `php artisan cache:clear` — too large a blast radius.
+
+```bash
+# Path-based recovery (existing)
+php artisan smking:cache:purge /products/widget
+
+# Product-id recovery (new in round-3)
+php artisan smking:cache:purge --product-id=42
+```
+
+Mutually exclusive with `<path>` argument; rejects zero / non-positive IDs.
+
+### Tests added (5 new in this round, 1 obsolete removed)
+
+- `test_circuit_breaker_trips_after_server_error_and_short_circuits_other_paths` — proves cross-path namespace protection
+- `test_circuit_breaker_can_be_disabled` — opt-out works
+- `test_pending_response_caches_for_short_window` — pending now hits cache on second call
+- `test_purge_by_product_id_clears_correct_cache_key`
+- `test_purge_rejects_both_path_and_product_id`
+- `test_purge_rejects_zero_product_id`
+- (removed obsolete `test_pending_status_does_not_cache` — behavior reversed)
+
+114 tests total (was 109).
+
+### Internal
+
+- `AeoClient::circuitOpen()` / `tripCircuit()` / `circuitKey()` — three new private helpers
+- `CachePurgeCommand::purgeByPath()` / `purgeByProductId()` — split handler
+
+## v0.7.0 — pre-release adversarial review fixes (round 2)
+
+A second adversarial review (codex) caught three real defects in the round-1 fixes. Folded into v0.7.0 before tagging.
+
+### [critical] Single-flight lock detection was inert
+
+`supportsLock` previously used `method_exists($repository, 'lock')`. Laravel's `Repository` doesn't declare `lock()` — it forwards via `__call` to the underlying store. Result: the check was always false and `singleFlight()` / `singleFlightMarkdown()` silently fell back to plain fetch+write on EVERY driver, including redis/memcached/database/array — exactly the production drivers the protection was supposed to cover.
+
+Fix: detect via `$repository->getStore() instanceof Illuminate\Contracts\Cache\LockProvider`. Verified with regression test using `ArrayStore` (which IS a `LockProvider`) — pre-acquire the lock, then assert `forPath()` returns `notFound` without sending any HTTP request, proving the contention path actually fires.
+
+### [high] `smking:cache:purge` could miss the real cache key
+
+Middleware canonicalizes paths (strips trailing slashes from non-root URLs) before writing cache. The purge command used the raw CLI argument. So an operator running `smking:cache:purge /products/widget/` during an outage would get a "success" message but leave the actual `/products/widget` cache entry stuck for the full 24hr `server_error` TTL.
+
+Fix: extracted `Smking\Laravel\Support\PathNormalizer::canonical()` static helper. Both middleware and purge command now share it. Purge command also surfaces canonicalized path in output when input differed. Regression test: prime cache via `forPath('/products/widget')`, run `cache:purge /products/widget/` (trailing slash), assert canonical entry is gone.
+
+### [medium] `admin*` regression in default `except`
+
+Removing `admin*` from `EXCEPT_PATTERNS` (round-1 fix) was an over-correction. `admin*` is a strong Laravel convention (>90% of installs use exactly that path; Laravel docs and tutorials use it as the canonical example). Unlike business URLs (`/cart` vs `/購物車`), admin path is essentially a framework norm. Removing it for v0.7.0 default would silently expand middleware blast radius into authenticated staff surfaces for every install relying on defaults.
+
+Fix: restored `admin*` in `Defaults::EXCEPT_PATTERNS`. `cart`/`checkout`/`account`/`login`/etc. (truly business-specific) stay in `SUGGESTED_BUSINESS_EXCEPT` opt-in template.
+
+### feat: gradual rollout / A/B documentation
+
+Added README "Gradual rollout / A/B comparison" section walking through `config('smking.only')` whitelist patterns — soft-launch one URL, expand to a section, run an A/B over 2-3 paths against a control. The feature already existed (`only` is checked before `except` in `shouldInject()`), but wasn't documented as a rollout tool.
+
+### Tests added (12 new in this round)
+
+- `test_lock_acquired_on_arraystore_lockprovider` — proves single-flight contention path actually fires
+- `test_default_except_keeps_admin_convention` — regression
+- `test_purge_canonicalizes_trailing_slash_to_match_middleware` — outage-recovery reliability
+- `Tests\Support\PathNormalizerTest` — 9 data-provider cases covering canonical edge cases
+
+109 tests total (was 97).
+
+### Internal
+
+- `AeoClient::supportsLock()` — new private helper using `LockProvider` instanceof
+- `Smking\Laravel\Support\PathNormalizer` — new shared canonicalizer
+
+## v0.7.0
+
+**Major outage hardening + behavior changes**. Customers must bump composer constraint `^0.6` → `^0.7`.
+
+### feat(concurrency): single-flight cache lock — million-PV thundering-herd protection
+
+Adversarial review (codex) caught the missing piece: under a cold key + concurrent requests, every PHP-FPM worker would otherwise enter the upstream call simultaneously before any cache write lands — the 24hr `server_error` TTL only takes effect AFTER a write, so the first wave still saturates the worker pool.
+
+v0.7.0 wraps both `remember()` (forPath) and `rememberMarkdown()` with a cache lock (`Cache::lock()`):
+
+- One worker acquires the lock, calls upstream, writes cache, releases.
+- Concurrent workers find lock held, fail open immediately — `forPath` returns `notFound`, `getMarkdown` returns `null`. They DO NOT block on the upstream call.
+- After the lock-holder writes cache, all subsequent requests hit cache directly (no lock needed).
+
+Lock TTL: `connect_timeout + read_timeout + 2s` slack (default ~5s) — short enough that a crashed worker doesn't permanently block the key. Falls back to plain fetch+write if the cache driver lacks lock support (regression-safe).
+
+Production behavior: instead of N concurrent workers each holding a worker for 1.5s on a cold path, ONE worker holds for 1.5s and the rest fail open in microseconds. **Real fix for million-PV cold-start** — not just steady-state.
+
+### feat(outage): three-tier cache TTL — million-PV protection
+
+`AeoClient` now distinguishes three negative-cache outcomes:
+
+| Status | TTL | When |
+|---|---|---|
+| `ready` | full ttl (default 1hr, unchanged) | Successful response with content |
+| `not_found` | **15 min** (was 30s) | 4xx — SaaS rejected the request (bad key, unaudited path) |
+| `server_error` (new) | **24 hr** | 5xx, DNS failure, TCP refused, read timeout — SaaS unreachable |
+
+The 24hr `server_error` TTL is the headline change: a hung upstream on a million-PV-per-day site can saturate the PHP-FPM worker pool in seconds when every cache miss holds a worker for `timeout` seconds. Caching the failure for 24 hours means each path retries at most once per day — outage becomes invisible to traffic after the first wave fails over.
+
+Customer recovery: `php artisan smking:cache:purge <path>` forgets the cached failure. See **Outage Runbook** in README.
+
+`AeoResponse::STATUS_SERVER_ERROR` + `AeoResponse::serverError()` factory added. `isReady()` returns `false` for both `not_found` and `server_error` (middleware behavior unchanged — both result in zero injection).
+
+### feat(timeout): connect/read split — `connect_timeout` 1s, `timeout` 1.5s
+
+Single `timeout=3s` was too generous for high-traffic sites:
+
+- 50-worker PHP-FPM pool × 3s timeout → saturation point ~17 RPS
+- 50-worker × (1s connect + 1.5s read) → saturation point ~20 RPS
+
+Split exposed via two config keys + env vars:
+
+```dotenv
+SMKING_CONNECT_TIMEOUT=1.0
+SMKING_HTTP_TIMEOUT=1.5
+```
+
+Million-PV sites can drop further (`SMKING_HTTP_TIMEOUT=1`, `SMKING_CONNECT_TIMEOUT=0.5`). Combined with the 24hr `server_error` cache, a single timeout barely matters — first request fails fast, then 24hr cache absorbs everything.
+
+### feat(except): two-layer Defaults — technical-only by default, business routes opt-in
+
+Adversarial review pushed back on a design mistake: shipping `cart`, `checkout`, `account`, `login`, etc. as defaults assumes customer URL conventions the SDK has no way to know. Different sites use `/cart` vs `/購物車` vs `/shopping-bag`; `/login` vs `/sign-in` vs `/auth/login`. SDK can't make those calls for the customer.
+
+v0.7.0 ships **two** const arrays:
+
+- `Defaults::EXCEPT_PATTERNS` — **technical-only**, used by the published config:
+  - Laravel API conventions (`api/*`, `v1/*`, `oauth/*`, `webhooks/*`, …)
+  - Realtime / SPA endpoints (`livewire/*`)
+  - HTTP health check standards (`up`, `health`, `healthz`, `ping`)
+  - Dev tooling (`telescope*`, `horizon*`, `_debugbar*`, `_ignition*`)
+  - Admin packages (`nova*`, `filament*`)
+  - **Removed from the default**: `admin*` (customer-specific path), all
+    cart/checkout/account/login/etc. patterns
+
+- `Defaults::SUGGESTED_BUSINESS_EXCEPT` — **template, not enabled by default**. Lists common e-commerce + auth patterns (root + wildcard variants of `cart`, `checkout`, `account`, `profile`, `dashboard`, `login`, `sign-in`, `register`, `password`, etc.) for customers to copy-paste after reviewing their actual `php artisan route:list` output:
+
+```php
+// config/smking.php — opt-in spread
+'except' => [
+    ...\Smking\Laravel\Defaults::EXCEPT_PATTERNS,
+    ...\Smking\Laravel\Defaults::SUGGESTED_BUSINESS_EXCEPT,
+    'my/store-specific/path',
+],
+```
+
+Both root (`account`) and wildcard (`account/*`) patterns are included — Laravel's `Request::is('account/*')` does NOT match `/account`, so you need both to cover dashboard root + sub-routes.
+
+### feat: `php artisan smking:cache:purge <path>`
+
+Per-path cache invalidation for both AEO and markdown surfaces. Supports the outage-recovery + content-refresh workflows described in README. Bulk purge requires driver-level key enumeration (not exposed by the Cache facade) — for full reset, `php artisan cache:clear`.
+
+`AeoClient` exposes `cacheNamespace()` + `cacheKeyPrefixes()` + `cacheStore()` as `@internal` API for the command to reconstruct keys without reaching into private state.
+
+### docs: README "Outage Runbook"
+
+New section walks through the three-tier cache, timeout knobs, `SMKING_AUTO_INJECT=false` kill switch, and `cache:purge` recovery path. Read this before you go to prod.
+
+### Tests added (21 new)
+
+- `test_5xx_response_treated_as_server_error_not_not_found`
+- `test_4xx_response_still_treated_as_not_found`
+- `test_connection_exception_treated_as_server_error`
+- `test_server_error_caches_for_24_hours_by_default`
+- `test_pending_status_does_not_cache`
+- `test_connect_timeout_and_read_timeout_passed_separately`
+- `test_default_except_includes_ecommerce_and_auth_routes`
+- `test_default_except_still_covers_legacy_categories`
+- `test_config_uses_defaults_const`
+- `test_purge_removes_aeo_and_markdown_keys_for_path`
+- `test_purge_only_clears_current_namespace_after_key_rotation`
+- `test_single_flight_lock_lifecycle_does_not_leak`
+- `test_single_flight_falls_back_when_driver_lacks_lock`
+- `test_single_flight_re_checks_cache_after_lock_acquired`
+- `test_get_markdown_without_env_does_not_leak_status_across_calls`
+- `test_default_except_does_NOT_include_business_assumptions`
+- `test_suggested_business_except_includes_root_and_wildcard_variants`
+- (+ regression rename `test_failed_request_returns_not_found` → `test_failed_4xx_returns_not_found`)
+
+97 tests total (was 80).
+
+### Internal
+
+- `AeoClient::connectTimeout()`, `AeoClient::readTimeout()` — new private helpers
+- `AeoClient::cacheNamespace()`, `AeoClient::cacheKeyPrefixes()`, `AeoClient::cacheStore()` — new `@internal` public methods (for the cache-purge command)
+- `AeoClient::singleFlight()` + `AeoClient::singleFlightMarkdown()` — new private cache-lock wrappers
+- `AeoClient::fetchMarkdown()` now returns `array{body: ?string, status: string}` (was `?string` + mutable `$lastMarkdownStatus` instance prop, removed in adversarial-review fix)
+- `Smking\Laravel\Defaults` — new public const class with two layers (`EXCEPT_PATTERNS` technical-only + `SUGGESTED_BUSINESS_EXCEPT` opt-in template)
+- `Smking\Laravel\Console\CachePurgeCommand` — new artisan command
+
+### Migration
+
+Customers must bump composer constraint:
+
+```bash
+# composer.json
+"smking/laravel": "^0.7"
+```
+
+Then `composer update smking/laravel`. If you customized `except[]` in your published `config/smking.php`, run `php artisan smking:doctor` (the v0.6.3 schema-drift check shows you what to merge in). Or re-publish with `--force` to start from the new baseline.
+
+## v0.6.3
+
+**Patch**: docs + diagnostics. No behavior changes.
+
+### docs: README "Upgrading" section
+
+New section explaining v0.x caret semantics (`^0.6` = `>=0.6.0 <0.7.0`, minor bumps treated as breaking under Composer pre-1.0 convention) plus `composer install` vs `composer update` guidance for production deploys. Links to CHANGELOG so users can read what changed before bumping minor.
+
+### chore(doctor): config schema drift check
+
+`php artisan smking:doctor` now includes a 7th check that compares the customer's published `config/smking.php` against the package's bundled default. Reports keys present in the package but missing from the user's file — happens after a package upgrade where `vendor:publish` SKIPPED the existing file.
+
+The check is **info-only** (never fails the doctor exit code). Three branches:
+- Config not published → `drift check skipped`
+- Published in sync with package → `in sync with package defaults`
+- Published with stale schema → lists missing keys + re-publish hint
+
+`mergeConfigFrom()` in the service provider already overlays defaults at runtime so missing keys aren't a runtime bug — the check just surfaces "you may want to see what's new".
+
+### Tests added
+
+- `test_doctor_reports_missing_keys_when_published_config_lags`
+- `test_doctor_reports_in_sync_when_published_config_matches_package`
+- `test_doctor_drift_check_is_info_only_never_fails`
+- `test_doctor_drift_check_skips_when_config_not_published`
+
+80 tests total (was 76).
+
+### Internal
+
+- `DoctorCommand::checkConfigSchemaDrift()` + `collectMissingKeys()` + `isAssociative()` — three new private helpers.
+
 ## v0.6.2
 
 **New feature**: middleware now injects a real `<img>` tag in body so SPA-rendered pages have a server-side product image in raw HTML.

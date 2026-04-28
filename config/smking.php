@@ -1,5 +1,7 @@
 <?php
 
+use Smking\Laravel\Defaults;
+
 return [
     /*
     |--------------------------------------------------------------------------
@@ -70,36 +72,30 @@ return [
         // 'shop/*',
     ],
 
-    'except' => [
-        // API routes — middleware should never touch JSON / non-HTML.
-        'api/*',
-        'v1/*',
-        'v2/*',
-        'graphql',
-        'webhooks/*',
-        'oauth/*',
-
-        // Real-time / live components — Livewire diff payloads aren't HTML
-        // documents and break if rewritten.
-        'livewire/*',
-
-        // Health checks and platform endpoints.
-        'up', // Laravel 11 default health route
-        'health',
-        'healthz',
-        'ping',
-
-        // Dev tooling — debug bars / error overlays / queue dashboards.
-        'telescope*',
-        'horizon*',
-        '_ignition*',
-        '_debugbar*',
-
-        // Admin dashboards — assume auth-only, AEO content is public-facing.
-        'admin*',
-        'nova*',
-        'filament*',
-    ],
+    // Two-layer default:
+    //
+    //   EXCEPT_PATTERNS         — technical-only (api/*, livewire/*,
+    //                             telescope*, horizon*, health checks, etc.).
+    //                             Safe across all Laravel sites because the
+    //                             framework / packages own those paths.
+    //
+    //   SUGGESTED_BUSINESS_EXCEPT — common e-commerce + auth patterns
+    //                             (cart, checkout, account, login, …).
+    //                             **NOT enabled by default** — URL naming
+    //                             varies per site (`/cart` vs `/購物車`).
+    //                             Run `php artisan route:list` to identify
+    //                             your session-bound / no-public-content
+    //                             routes, then either spread the const or
+    //                             write your own list.
+    //
+    // Typical customer config after review:
+    //
+    //   'except' => [
+    //       ...Defaults::EXCEPT_PATTERNS,
+    //       ...Defaults::SUGGESTED_BUSINESS_EXCEPT,
+    //       'my/store-specific/path',
+    //   ],
+    'except' => Defaults::EXCEPT_PATTERNS,
 
     /*
     |--------------------------------------------------------------------------
@@ -169,11 +165,18 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Response Cache
+    | Response Cache (three-tier TTL since v0.7.0)
     |--------------------------------------------------------------------------
     |
     | AEO responses are cached via Laravel's cache repository to avoid hitting
-    | the API on every request. Set ttl to 0 to disable caching.
+    | the API on every request. v0.7.0 splits negative-cache TTL into two
+    | tiers based on whether the SaaS rejected the request (4xx, treated as
+    | "not found") or is unreachable / broken (5xx + connection errors,
+    | treated as "server_error"). The longer server_error TTL kills the
+    | retry loop against a dead upstream — critical for million-PV sites
+    | where a hanging upstream can saturate the PHP-FPM worker pool.
+    |
+    | Customers force a re-try via `php artisan smking:cache:purge`.
     |
     */
     'cache' => [
@@ -181,22 +184,69 @@ return [
         'store' => env('SMKING_CACHE_STORE'),
         'ttl' => env('SMKING_CACHE_TTL', 3600),
 
-        // Short TTL for not_found responses so the customer's cache doesn't
-        // mask the moment the backend finishes auditing the path. ready
-        // responses keep the full ttl above.
-        'not_found_ttl' => env('SMKING_NOT_FOUND_TTL', 30),
+        // 4xx / "path not crawled yet" — short TTL lets the backend audit
+        // catch up. v0.7.0 round-4: 60s default (down from a brief 900s in
+        // the round-1..3 cuts). The `forPath()` POST registers the path
+        // for background crawling — a fresh product launch typically
+        // becomes ready within 1-2 minutes, so a 60s miss TTL means the
+        // very next request after crawl/generate finishes already serves
+        // ready content. The 900s default would have masked the ready
+        // transition for up to 15 minutes. Customers running extreme PV
+        // who want a longer miss cushion (worker-pool stampede protection
+        // is already covered by `pending_ttl` + `circuit_breaker`) can
+        // set `SMKING_NOT_FOUND_TTL` to a higher value.
+        'not_found_ttl' => env('SMKING_NOT_FOUND_TTL', 60),
+
+        // 5xx / DNS / TCP / read timeout — long TTL since SaaS is broken.
+        // v0.7.0 (new): 24hr default. Customer recovery: `cache:purge`.
+        'server_error_ttl' => env('SMKING_SERVER_ERROR_TTL', 86400),
+
+        // Pending (202 from SaaS — backlog still crawling). v0.7.0 round-3:
+        // cache for short window so a hot-launch URL doesn't hammer the
+        // crawler queue every request. After this TTL the next request
+        // checks again — by then the crawl usually completed (ready).
+        'pending_ttl' => env('SMKING_PENDING_TTL', 15),
+
+        // Namespace-wide circuit breaker. v0.7.0 round-3: when ANY path
+        // hits a 5xx / transport error, set a flag for circuit_breaker_ttl
+        // seconds. While the flag is present, all forPath() / getMarkdown()
+        // calls short-circuit with server_error WITHOUT touching the
+        // upstream. Critical for outage protection on high-cardinality
+        // sites — per-path 24hr cache only protects keys we've seen fail.
+        // Auto half-open: when the flag expires, the next request hits
+        // upstream; success keeps it closed, failure trips again.
+        'circuit_breaker' => env('SMKING_CIRCUIT_BREAKER', true),
+        'circuit_breaker_ttl' => env('SMKING_CIRCUIT_BREAKER_TTL', 60),
 
         'prefix' => 'smking:aeo:',
+        'markdown_prefix' => 'smking:md:',
+        'circuit_prefix' => 'smking:circuit:',
     ],
 
     /*
     |--------------------------------------------------------------------------
-    | HTTP Client
+    | HTTP Client (connect / read split since v0.7.0)
     |--------------------------------------------------------------------------
     |
-    | Timeout (seconds) for the API call. Kept intentionally low so a slow
-    | upstream never blocks a page render for users.
+    | v0.7.0 splits the previous single 3s `timeout` into two knobs to bound
+    | the worst case for high-traffic sites:
+    |
+    |   connect_timeout  — TCP handshake + DNS upper bound. Defends against
+    |                      DNS-resolver hangs (which Laravel's read timeout
+    |                      doesn't cover).
+    |   timeout          — Total response time after the connection's open.
+    |
+    | Default (1s + 1.5s = 2.5s worst case per cache miss) trades 60-second
+    | self-heal for FPM-pool protection. Million-PV sites can drop further:
+    |
+    |   SMKING_HTTP_TIMEOUT=1
+    |   SMKING_CONNECT_TIMEOUT=0.5
+    |
+    | Combined with the three-tier cache (server_error → 24hr) a single
+    | timeout barely matters — first request fails fast, then 24hr cache
+    | kicks in.
     |
     */
-    'timeout' => env('SMKING_HTTP_TIMEOUT', 3),
+    'connect_timeout' => env('SMKING_CONNECT_TIMEOUT', 1.0),
+    'timeout' => env('SMKING_HTTP_TIMEOUT', 1.5),
 ];

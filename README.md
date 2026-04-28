@@ -116,6 +116,165 @@ The `<x-smking-meta />` component mirrors `getSmkingMetadata()` from `@smking/ne
 8. **Agent discovery** (v0.5.0+): every HTML response advertises the markdown alternate via `Link: <{url}>; rel="alternate"; type="text/markdown"` (RFC 8288). Appended to any existing Link headers; idempotent if you already wired your own.
 9. **Visually-hidden body fragments by default** (v0.6.0+): auto-injected `summaryHtml` / `faqHtml` are wrapped in an inline-style sr-only `<div>` so they don't pollute SPA layouts where `</body>` injection lands outside `#app`. Microdata stays in the DOM (Googlebot reads it); JSON-LD in `<head>` is the primary AEO signal. Switch with `SMKING_INJECT_VISIBILITY=visible` if you want the v0.5.x behavior. The `<x-smking-aeo />` Blade component is unaffected — explicit placement is always rendered as you wrote it.
 
+## Gradual rollout / A/B comparison
+
+`config('smking.only')` is a strict whitelist — when non-empty, the middleware only runs on paths that match. Use it to roll out smking gradually, or to A/B-compare smking-enabled paths against untouched ones.
+
+### Soft launch one URL
+
+```php
+// config/smking.php
+'only' => ['products/widget'],
+```
+
+Now only `https://your-site.com/products/widget` gets smking-injected meta + JSON-LD. Every other page is untouched. Measure impact for a week before expanding.
+
+### Expand to one section
+
+```php
+'only' => ['products/*'],
+```
+
+All product pages enabled, rest of site untouched. Continue measuring against control pages (homepage, blog, etc.).
+
+### A/B comparison
+
+```php
+'only' => [
+    'products/widget',   // Variant A — smking enabled
+    'products/gizmo',    // Variant B — smking enabled
+    // 'products/sprocket' — Control: NOT in `only`, no smking
+],
+```
+
+Compare AEO score / search ranking / AI-citation share across the three pages over your measurement window.
+
+### Full rollout
+
+```php
+'only' => [],   // empty == every HTML page (default behavior)
+```
+
+`only` patterns use Laravel's `Request::is()` syntax, identical to `except`. Combine both — `only` is checked first (must match), then `except` (must not match) — so you can whitelist `products/*` and blacklist `products/draft-*` simultaneously.
+
+## Outage Runbook
+
+When the smking SaaS is down or unreachable, the SDK fails open — your pages still render normally, just without smking-injected content. Three knobs you may want to know about:
+
+### 0. Layered protection — single-flight + circuit breaker (v0.7.0+)
+
+Two complementary defenses run on every cache miss:
+
+**Single-flight cache lock** — When a path is uncached and traffic spikes, only ONE PHP-FPM worker calls smking upstream; others fail open immediately (return un-injected page). Per-path protection. Uses `Cache::lock()` (redis / memcached / database / array drivers; graceful fallback for stores without lock support).
+
+**Per-surface circuit breaker** — Once any path hits a 5xx / transport error, a flag is set for `circuit_breaker_ttl` seconds (default 60). While the flag is present, every path on THAT surface short-circuits without touching the upstream. Protects against high-cardinality outage events (catalog spray, full-site crawler) where per-path cache wouldn't help — the second URL in the burst doesn't know the first one just failed. Auto half-open: when the flag expires the next request hits upstream; success closes the breaker, another failure trips it again. Disable with `SMKING_CIRCUIT_BREAKER=false` if your customer cache layer can't store namespace flags reliably.
+
+Two independent breakers exist (since v0.7.0 round-4):
+
+- HTML AEO injection (`/api/v1/public/aeo`, every page render) — `smking:circuit:aeo:{ns}`
+- Markdown for agents (`/api/v1/public/md`, agent-only `Accept: text/markdown` clients) — `smking:circuit:md:{ns}`
+
+A markdown outage no longer suppresses HTML injection: the agent surface is optional, and an issue isolated there should never affect the customer-facing render path. Both surfaces still rotate together when `(api_key, base_url)` changes.
+
+### 1. Cache absorbs most outages automatically (v0.7.0+)
+
+Three-tier cache TTL since v0.7.0:
+
+| Status | TTL | Behavior |
+|---|---|---|
+| `ready` | 1 hour | Customer's cached AEO content keeps serving |
+| `not_found` (4xx) | 60 sec | Backend audit catching up; first-launch products visible within ~1 min after crawl/generate completes |
+| `pending` (202) | 15 sec | SaaS explicit "in-progress" signal — short cushion against hot-launch polling |
+| `server_error` (5xx, DNS, TCP, timeout) | **24 hours** | Don't hammer dead upstream |
+
+A million-PV-per-day site running Laravel can saturate its PHP-FPM pool when a hung upstream holds workers. The 24hr `server_error` cache means each path is retried at most once per day — outage is invisible to your traffic after the first wave fails over.
+
+### 2. Tighten timeouts further if you're at scale
+
+Default since v0.7.0: `connect_timeout=1s`, `timeout=1.5s`. For million-PV sites where every millisecond counts:
+
+```dotenv
+SMKING_CONNECT_TIMEOUT=0.5
+SMKING_HTTP_TIMEOUT=1
+```
+
+### 3. Kill switch when SaaS is in trouble
+
+Set in `.env` and clear config cache:
+
+```dotenv
+SMKING_AUTO_INJECT=false
+```
+
+Middleware still emits `X-Smking-Status` headers (so `curl -I` install verification works) but doesn't try to fetch any content. Reverts to original page entirely.
+
+### 4. Recovering after SaaS comes back
+
+Per-path:
+
+```bash
+php artisan smking:cache:purge /products/widget
+```
+
+This forgets both `smking:aeo:*` and `smking:md:*` cache for that path AND clears the per-surface circuit breakers so the next request actually re-fetches (no waiting for breaker TTL). Use this whenever you've fixed something upstream and want immediate recovery on a specific path.
+
+Per WC product:
+
+```bash
+php artisan smking:cache:purge --product-id=42
+```
+
+Clears the AEO-surface entry for that product plus the AEO-surface circuit breaker.
+
+For wholesale recovery (clears the whole app cache):
+
+```bash
+php artisan cache:clear
+```
+
+## Upgrading
+
+This package is in `v0.x`. Per Composer's caret convention for pre-1.0 packages, **every minor bump (0.5 → 0.6, 0.6 → 0.7) is treated as breaking** — the constraint `"smking/laravel": "^0.6"` resolves to `>=0.6.0 <0.7.0` and `composer update` won't cross into 0.7.
+
+### Cross-minor upgrade (e.g. 0.6 → 0.7)
+
+Edit `composer.json` to bump the constraint, then update:
+
+```bash
+# 1. Bump constraint
+composer require smking/laravel:^0.7
+
+# 2. (optional) refresh published config — see docs/upgrading note below
+php artisan vendor:publish --tag=smking-config --force
+php artisan config:clear
+
+# 3. Verify install
+php artisan smking:doctor
+```
+
+`smking:doctor` (v0.6.3+) shows a "config schema drift" row that lists any new keys present in the package default but missing from your published `config/smking.php` — handy for deciding whether to re-publish.
+
+### In-minor upgrade (patch, e.g. 0.6.1 → 0.6.2)
+
+Patches stay in your existing `^0.X` range — `composer update` is enough:
+
+```bash
+composer update smking/laravel
+```
+
+### Deploying to production
+
+Always commit `composer.lock` to your repo and use `composer install` (NOT `update`) on production deploys:
+
+```bash
+# CI / deploy script
+composer install --no-dev --optimize-autoloader
+```
+
+`composer install` reads the lockfile and installs the exact versions you tested in staging. `composer update` re-resolves and may pull a release into prod that bypassed QA — especially risky while this package is `v0.x` with breaking minors. Always bump in dev, test in staging, then ship the lockfile.
+
+See [CHANGELOG.md](CHANGELOG.md) for what each release changes.
+
 ## Requirements
 
 - PHP 8.1+
