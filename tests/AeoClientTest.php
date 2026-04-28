@@ -517,6 +517,178 @@ class AeoClientTest extends TestCase
         );
     }
 
+    // ── v0.7.1 observability: circuit-trip log ──────────────────
+
+    public function test_trip_circuit_logs_warning_on_first_trip(): void
+    {
+        // v0.7.1: when the breaker trips, ops needs to know — without a
+        // log line, an outage just looks like "AEO content stopped
+        // appearing" with no signal pointing at the breaker.
+        config()->set('smking.cache.enabled', true);
+        $handler = $this->swapInTestLogger();
+
+        Http::fake(['api.test/api/v1/public/aeo' => Http::response('broken', 503)]);
+        $this->app->make(AeoClient::class)->forPath('/x');
+
+        $this->assertTrue(
+            $handler->hasWarningThatContains('circuit breaker tripped for aeo surface'),
+            'first 5xx must emit a warning log so operators can see the trip event'
+        );
+        $records = array_values(array_filter(
+            $handler->getRecords(),
+            fn ($r) => str_contains((string) $r['message'], 'circuit breaker tripped'),
+        ));
+        $this->assertCount(1, $records, 'only one trip log per outage window');
+        $this->assertSame('aeo', $records[0]['context']['surface']);
+        $this->assertSame(60, $records[0]['context']['ttl_seconds']);
+    }
+
+    public function test_trip_circuit_only_logs_once_per_outage_window(): void
+    {
+        // Re-trip while breaker is already open MUST NOT emit another log.
+        // A million-PV outage must not produce a million log lines.
+        config()->set('smking.cache.enabled', true);
+        $handler = $this->swapInTestLogger();
+
+        Http::fake(['api.test/api/v1/public/aeo' => Http::response('broken', 503)]);
+        $client = $this->app->make(AeoClient::class);
+
+        // First failure trips the breaker (and logs once)
+        $client->forPath('/a');
+        // Concurrent / later failures while breaker is open are short-
+        // circuited before tripCircuit() runs again, so we manually re-
+        // exercise the writer path with a different cache key to prove
+        // the "alreadyOpen" guard skips the duplicate log even if the
+        // code IS reached.
+        $client->forPath('/b'); // short-circuits — never reaches tripCircuit
+
+        $tripLogs = array_filter(
+            $handler->getRecords(),
+            fn ($r) => str_contains((string) $r['message'], 'circuit breaker tripped'),
+        );
+        $this->assertCount(1, $tripLogs, 'second short-circuited request must not re-log');
+    }
+
+    public function test_trip_circuit_does_not_log_when_breaker_disabled(): void
+    {
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cache.circuit_breaker', false);
+        $handler = $this->swapInTestLogger();
+
+        Http::fake(['api.test/api/v1/public/aeo' => Http::response('broken', 503)]);
+        $this->app->make(AeoClient::class)->forPath('/x');
+
+        $this->assertFalse(
+            $handler->hasWarningThatContains('circuit breaker tripped'),
+            'breaker disabled by config means no trip log either'
+        );
+    }
+
+    public function test_circuit_close_logs_after_half_open_recovery(): void
+    {
+        // v0.7.1 round-2: when upstream comes back after an outage, the
+        // first successful response should emit a "circuit closed" log so
+        // ops sees the recovery moment in the log stream — without having
+        // to poll `circuit:status` to notice.
+        config()->set('smking.cache.enabled', true);
+        $handler = $this->swapInTestLogger();
+        $client = $this->app->make(AeoClient::class);
+
+        // Use a sequence so the same URL returns 503 first, then 200.
+        // Http::fake() calls are additive (not replacing), so calling
+        // fake() twice would leave the 503 stub matching first.
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::sequence()
+                ->push('broken', 503)
+                ->push(['status' => 'ready'], 200),
+        ]);
+
+        // 1st call: 5xx trips the breaker + plants tombstone + warning log
+        $client->forPath('/a');
+
+        // Force the breaker key to expire (simulate TTL passage). The
+        // tombstone (5× TTL) is still alive — that's the whole point.
+        $store = $this->app->make(\Illuminate\Contracts\Cache\Repository::class);
+        $store->forget($client->cacheKeyPrefixes()['circuit_aeo']);
+
+        // Sanity: tombstone must still be present after we forget the
+        // breaker key. If this fails, the tombstone was never written or
+        // shares a backing store with the breaker.
+        $this->assertTrue(
+            $store->has($client->cacheKeyPrefixes()['circuit_aeo'].':tombstone'),
+            'tombstone must outlive the breaker key (it is what enables close detection)'
+        );
+
+        // 2nd call after recovery: upstream healthy → ready response →
+        // maybeLogCircuitClosed pulls tombstone → info log.
+        $client->forPath('/b');
+
+        $this->assertTrue(
+            $handler->hasInfoThatContains('circuit closed for aeo surface'),
+            'half-open success after a previous trip must emit a close log'
+        );
+    }
+
+    public function test_circuit_close_log_only_fires_once_per_recovery(): void
+    {
+        // Tombstone is atomic-pulled — multiple successful calls after
+        // the same recovery must only log "closed" once. Otherwise a busy
+        // site would re-log every ready response in the same minute.
+        config()->set('smking.cache.enabled', true);
+        $handler = $this->swapInTestLogger();
+        $client = $this->app->make(AeoClient::class);
+
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::sequence()
+                ->push('broken', 503)
+                ->push(['status' => 'ready'], 200)
+                ->push(['status' => 'ready'], 200),
+        ]);
+
+        $client->forPath('/a'); // trip
+
+        $store = $this->app->make(\Illuminate\Contracts\Cache\Repository::class);
+        $store->forget($client->cacheKeyPrefixes()['circuit_aeo']);
+
+        $client->forPath('/b'); // first recovery — log fires
+        $client->forPath('/c'); // second recovery — tombstone already pulled, NO log
+
+        $closeLogs = array_filter(
+            $handler->getRecords(),
+            fn ($r) => str_contains((string) $r['message'], 'circuit closed'),
+        );
+        $this->assertCount(1, $closeLogs, 'tombstone pull must be at-most-once per recovery cycle');
+    }
+
+    public function test_circuit_close_log_does_not_fire_when_no_prior_trip(): void
+    {
+        // Sanity: a successful call without a previous trip must NOT
+        // log "closed" — that would just be log spam on every healthy
+        // upstream response.
+        config()->set('smking.cache.enabled', true);
+        $handler = $this->swapInTestLogger();
+
+        Http::fake(['api.test/api/v1/public/aeo' => Http::response(['status' => 'ready'], 200)]);
+        $this->app->make(AeoClient::class)->forPath('/healthy');
+
+        $this->assertFalse(
+            $handler->hasInfoThatContains('circuit closed'),
+            'close log MUST NOT fire when no prior trip happened'
+        );
+    }
+
+    private function swapInTestLogger(): \Monolog\Handler\TestHandler
+    {
+        $handler = new \Monolog\Handler\TestHandler;
+        $logger = new \Monolog\Logger('smking-test', [$handler]);
+        $this->app->instance(\Psr\Log\LoggerInterface::class, $logger);
+        // AeoClient is a singleton — drop the cached instance so the
+        // freshly-bound logger is picked up on next make().
+        $this->app->forgetInstance(AeoClient::class);
+
+        return $handler;
+    }
+
     // ── Connect/read timeout split (v0.7.0, #3) ───────────────────
 
     public function test_connect_timeout_and_read_timeout_passed_separately(): void

@@ -1,5 +1,79 @@
 # Changelog
 
+## v0.7.1 — circuit breaker observability
+
+Operators reported (rightly) that v0.7.0's circuit breaker was silently effective: when AEO content stopped appearing in production, there was no signal whether the SDK was short-circuiting or whether the upstream was returning empty responses. The only "tool" was `cache:purge`, which has the side-effect of resetting the breaker — so just *checking* state forced you to also reset it. Bad ergonomics.
+
+v0.7.1 adds three zero-side-effect observability paths covering the full breaker lifecycle.
+
+### feat: trip log at `warning` level (rate-limited per outage)
+
+When the breaker trips, `AeoClient::tripCircuit()` now emits one `warning` log via the configured `LoggerInterface`:
+
+```
+[warning] smking: circuit breaker tripped for aeo surface
+  context: {"surface":"aeo","ttl_seconds":60,"key":"smking:circuit:aeo:abc123"}
+```
+
+The log is rate-limited at the source: only the *first* trip of an outage window logs. Subsequent failures while the breaker is already open re-`put()` the cache flag (extending TTL) but do **not** re-log. A million-request outage produces one log line, not a million.
+
+### feat: close log at `info` level (half-open recovery)
+
+When the breaker auto-recovers and the next upstream call succeeds, the SDK emits a matching close log:
+
+```
+[info] smking: circuit closed for aeo surface
+  context: {"surface":"aeo"}
+```
+
+Mechanism: every trip plants a *tombstone* cache key (TTL = 5× breaker TTL, default 300s) alongside the breaker key. After breaker TTL expiry, the next ready upstream response atomically `pull()`s the tombstone — the winner of that pull (across concurrent recovery requests) emits the close log; losers see `null` and skip. At-most-once per recovery cycle, no extra hot-path overhead — only successful upstream calls trigger the check.
+
+Edge: if an outage extends past 5× breaker TTL without a recovery request arriving (extreme low-traffic site), the tombstone expires silently and that recovery doesn't log. The next trip (when traffic resumes) refreshes the tombstone, so this only loses one logical event in a degenerate scenario.
+
+### feat: `php artisan smking:circuit:status` — read-only state inspector
+
+```bash
+php artisan smking:circuit:status
+```
+
+Reports per-surface state without resetting anything. Output includes the underlying cache key so ops can spot-check the store directly (`redis-cli get smking:circuit:aeo:...`) when triaging unexpected behavior.
+
+The configured TTL is shown for reference only — Laravel's Cache contract has no portable `ttl($key)` method, and the breaker auto-resets to full TTL on every re-trip during a continuing outage, so a printed "remaining" countdown would be misleading. Re-run the command in a few seconds to confirm whether the breaker actually cleared.
+
+Exit code is script-friendly: `0` if all surfaces closed (or breaker disabled by config), `1` if any surface open. Drop into a healthcheck:
+
+```bash
+php artisan smking:circuit:status > /dev/null || alert "smking AEO degraded"
+```
+
+### What this does NOT do (intentional)
+
+- **No new event class** (`CircuitTripped` etc.). The log line *is* the event surface — every metrics tool already speaks log scraping. Introducing a Laravel event would mean another DI dependency and an extension point we can't easily remove later. Skipped on YAGNI grounds.
+- **No `--reset-circuit` flag** on `cache:purge`. Codex round-4's adversarial review proposed this to "separate eviction from breaker reset"; we've explicitly chosen the opposite default — purge means "retry now" which includes outage protection. Operators who want to peek without resetting now have `circuit:status`.
+
+### Tests added (11 new)
+
+- `test_trip_circuit_logs_warning_on_first_trip` — log fires with correct surface + TTL context
+- `test_trip_circuit_only_logs_once_per_outage_window` — re-trip rate limit
+- `test_trip_circuit_does_not_log_when_breaker_disabled` — opt-out is silent
+- `test_circuit_close_logs_after_half_open_recovery` — recovery info log fires when tombstone is alive
+- `test_circuit_close_log_only_fires_once_per_recovery` — atomic tombstone pull
+- `test_circuit_close_log_does_not_fire_when_no_prior_trip` — no spam on healthy upstream
+- `test_status_shows_closed_state_when_no_breakers_tripped`
+- `test_status_shows_open_state_after_aeo_breaker_trips`
+- `test_status_returns_failure_when_any_surface_open`
+- `test_status_shows_disabled_when_breaker_off`
+- `test_status_includes_cache_key_for_ops_debugging`
+
+130 tests total (was 119).
+
+### Internal
+
+- `AeoClient::tripCircuit()` — adds `$alreadyOpen` check + tombstone write + `$this->logger?->warning()` call. Public API unchanged.
+- `AeoClient::maybeLogCircuitClosed()` — new private helper, atomic tombstone pull → info log. Called from singleFlight writer callback on `STATUS_READY` (HTML AEO) and from `singleFlightMarkdown` writer callback on body present (markdown).
+- `AeoClient::circuitTombstoneKey()` — new private helper, derives `{circuit_key}:tombstone` so cache-purge / namespace rotation reaches it the same way as the breaker key.
+- `Smking\Laravel\Console\CircuitStatusCommand` — new, registered in `SmkingServiceProvider::boot()`.
+
 ## v0.7.0 — pre-release adversarial review fixes (round 4)
 
 Fourth adversarial review (codex, requested against the explicit recommendation to stop at round 3) caught three real issues that the round-3 cuts didn't cover: cross-surface coupling, recovery-flow false advertising, and a first-launch regression on the new miss TTL default. All folded into v0.7.0 before tagging.

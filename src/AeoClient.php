@@ -197,6 +197,10 @@ class AeoClient
                 return;
             }
             $repository->put($cacheKey, $result['body'], $ttl);
+
+            // v0.7.1: markdown half-open success — log close event when
+            // recovering from a previous markdown outage.
+            $this->maybeLogCircuitClosed($repository, 'md');
         };
 
         if (! $this->supportsLock($repository)) {
@@ -414,6 +418,14 @@ class AeoClient
             if ($response->status === AeoResponse::STATUS_SERVER_ERROR) {
                 $this->tripCircuit($repository, 'aeo');
             }
+
+            // v0.7.1: half-open success → emit "circuit closed" log if
+            // we just recovered from an outage. Only checked on a ready
+            // response; tombstone is atomic-pulled so concurrent half-
+            // open requests log at most once.
+            if ($response->status === AeoResponse::STATUS_READY) {
+                $this->maybeLogCircuitClosed($repository, 'aeo');
+            }
         });
     }
 
@@ -470,11 +482,70 @@ class AeoClient
             return;
         }
 
-        $repository->put(
-            $this->circuitKey($surface),
-            true,
-            (int) ($cacheConfig['circuit_breaker_ttl'] ?? 60),
-        );
+        $key = $this->circuitKey($surface);
+        $alreadyOpen = $repository->has($key);
+        $ttl = (int) ($cacheConfig['circuit_breaker_ttl'] ?? 60);
+
+        $repository->put($key, true, $ttl);
+
+        // v0.7.1: refresh the tombstone on every trip (NOT gated on
+        // alreadyOpen) so a long outage extending past the original
+        // tombstone TTL still has a valid tombstone for the eventual
+        // half-open recovery to pull. Tombstone TTL is 5× breaker TTL
+        // so a brief network blip doesn't leave a stale recovery flag.
+        $repository->put($this->circuitTombstoneKey($surface), true, $ttl * 5);
+
+        // v0.7.1 observability: log only on the first trip of an outage
+        // window, not on every re-trip while the breaker is already open.
+        // An outage that produces 1000 failures should produce 1 log line,
+        // not 1000 — operators page on the trip event, not the steady-state.
+        // The breaker auto-resets when its TTL expires, so the next trip
+        // after recovery gets its own log line.
+        if (! $alreadyOpen) {
+            $this->logger?->warning("smking: circuit breaker tripped for {$surface} surface", [
+                'surface' => $surface,
+                'ttl_seconds' => $ttl,
+                'key' => $key,
+            ]);
+        }
+    }
+
+    /**
+     * v0.7.1: half-open recovery detection. Called on a successful upstream
+     * response to check whether this surface had previously tripped — if so,
+     * the tombstone is atomically pulled (only one concurrent recovery wins
+     * the pull) and a `circuit closed` info log is emitted.
+     *
+     * Atomic pull is what guarantees at-most-one log per recovery cycle:
+     * Laravel's `Cache::pull()` is a get-and-forget. Concurrent recovery
+     * requests after breaker TTL expiry race for the tombstone — the
+     * winner gets a non-null value and logs; losers get null and skip.
+     *
+     * @param  'aeo'|'md'  $surface
+     */
+    private function maybeLogCircuitClosed(\Illuminate\Contracts\Cache\Repository $repository, string $surface): void
+    {
+        $cacheConfig = $this->config->get('smking.cache', []);
+        if (! ($cacheConfig['circuit_breaker'] ?? true)) {
+            return;
+        }
+
+        if ($repository->pull($this->circuitTombstoneKey($surface)) !== null) {
+            $this->logger?->info("smking: circuit closed for {$surface} surface", [
+                'surface' => $surface,
+            ]);
+        }
+    }
+
+    /**
+     * Tombstone key is keyed off the same circuit-key prefix and surface so
+     * cache-purge / namespace rotation reaches it the same way.
+     *
+     * @param  'aeo'|'md'  $surface
+     */
+    private function circuitTombstoneKey(string $surface): string
+    {
+        return $this->circuitKey($surface).':tombstone';
     }
 
     /**
