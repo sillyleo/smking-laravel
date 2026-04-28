@@ -73,6 +73,15 @@ class InjectAeo
             // fall through to HTML so the agent gets *something* this turn.
         }
 
+        // v0.5.0: advertise the markdown alternate via Link header on every
+        // HTML response. Agent clients that don't speculatively send
+        // `Accept: text/markdown` can discover the alternate from the
+        // header (RFC 8288). Cloudflare's isitagentready.com page-level
+        // audit explicitly checks this — sites that emit it score higher.
+        if ($flags['markdown'] ?? true) {
+            $this->addMarkdownAlternateLink($response, $request->fullUrl());
+        }
+
         // If the response body is already encoded (gzip / br / deflate) we
         // can't rewrite it without decoding first — str_contains / preg_replace
         // would corrupt the binary payload. Emit headers above for install
@@ -493,6 +502,34 @@ class InjectAeo
         $response->headers->set('Vary', $this->mergeVary($existingVary, 'Accept'));
 
         return $response;
+    }
+
+    /**
+     * Emit `Link: <{url}>; rel="alternate"; type="text/markdown"` so agent
+     * clients can discover the markdown rendition without sending Accept
+     * speculatively. Appends to any existing Link header rather than
+     * replacing — customers may already advertise other alternates
+     * (rel="next", rel="prev", canonical headers, etc.).
+     *
+     * Idempotent: if any existing Link entry already advertises a markdown
+     * alternate (customer or a previous middleware run), we don't add
+     * another. Matches what auditUrl detects in v0.x:
+     *   /rel="?alternate"?/i  &&  /type="?text\/markdown"?/i
+     */
+    private function addMarkdownAlternateLink(Response $response, string $url): void
+    {
+        $existing = $response->headers->all('Link');
+        foreach ($existing as $header) {
+            if (
+                stripos($header, 'rel="alternate"') !== false
+                && stripos($header, 'text/markdown') !== false
+            ) {
+                return;
+            }
+        }
+
+        $entry = sprintf('<%s>; rel="alternate"; type="text/markdown"', $url);
+        $response->headers->set('Link', $entry, false);
     }
 
     private function mergeVary(string $existing, string $value): string
