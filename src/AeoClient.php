@@ -470,11 +470,25 @@ class AeoClient
             return;
         }
 
-        $repository->put(
-            $this->circuitKey($surface),
-            true,
-            (int) ($cacheConfig['circuit_breaker_ttl'] ?? 60),
-        );
+        $key = $this->circuitKey($surface);
+        $alreadyOpen = $repository->has($key);
+        $ttl = (int) ($cacheConfig['circuit_breaker_ttl'] ?? 60);
+
+        $repository->put($key, true, $ttl);
+
+        // v0.7.1 observability: log only on the first trip of an outage
+        // window, not on every re-trip while the breaker is already open.
+        // An outage that produces 1000 failures should produce 1 log line,
+        // not 1000 — operators page on the trip event, not the steady-state.
+        // The breaker auto-resets when its TTL expires, so the next trip
+        // after recovery gets its own log line.
+        if (! $alreadyOpen) {
+            $this->logger?->warning("smking: circuit breaker tripped for {$surface} surface", [
+                'surface' => $surface,
+                'ttl_seconds' => $ttl,
+                'key' => $key,
+            ]);
+        }
     }
 
     /**

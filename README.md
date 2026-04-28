@@ -232,6 +232,36 @@ For wholesale recovery (clears the whole app cache):
 php artisan cache:clear
 ```
 
+### 5. Inspecting circuit-breaker state (v0.7.1+)
+
+When AEO content stops appearing in production, the breaker may be silently short-circuiting upstream calls. Check it without touching the cache:
+
+```bash
+php artisan smking:circuit:status
+```
+
+Sample output (any surface open → exit code 1 for scripted health checks):
+
+```
+smking circuit breaker status:
+
+  aeo (HTML AEO injection): closed
+       key: smking:circuit:aeo:abc123
+  md  (markdown for agents): OPEN — re-check after configured TTL (60s)
+       key: smking:circuit:md:abc123
+
+Recovery: wait for TTL, or `php artisan smking:cache:purge <path>` / `--product-id=N` to force-clear.
+```
+
+The trip itself is logged at `warning` level the moment it fires (one log line per outage window — rate-limited so a million-request burst doesn't spam):
+
+```
+[warning] smking: circuit breaker tripped for aeo surface
+  context: {"surface":"aeo","ttl_seconds":60,"key":"smking:circuit:aeo:..."}
+```
+
+Wire your usual log → metric path (Datadog Logs / Sentry / etc.) to alert on this string when you want a paging trigger instead of a polling status check.
+
 ## Upgrading
 
 This package is in `v0.x`. Per Composer's caret convention for pre-1.0 packages, **every minor bump (0.5 → 0.6, 0.6 → 0.7) is treated as breaking** — the constraint `"smking/laravel": "^0.6"` resolves to `>=0.6.0 <0.7.0` and `composer update` won't cross into 0.7.

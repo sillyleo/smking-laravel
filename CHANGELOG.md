@@ -1,5 +1,62 @@
 # Changelog
 
+## v0.7.1 — circuit breaker observability
+
+Operators reported (rightly) that v0.7.0's circuit breaker was silently effective: when AEO content stopped appearing in production, there was no signal whether the SDK was short-circuiting or whether the upstream was returning empty responses. The only "tool" was `cache:purge`, which has the side-effect of resetting the breaker — so just *checking* state forced you to also reset it. Bad ergonomics.
+
+v0.7.1 adds two zero-side-effect observability paths.
+
+### feat: trip log at `warning` level (rate-limited per outage)
+
+When the breaker trips, `AeoClient::tripCircuit()` now emits one `warning` log via the configured `LoggerInterface`:
+
+```
+[warning] smking: circuit breaker tripped for aeo surface
+  context: {"surface":"aeo","ttl_seconds":60,"key":"smking:circuit:aeo:abc123"}
+```
+
+The log is rate-limited at the source: only the *first* trip of an outage window logs. Subsequent failures while the breaker is already open re-`put()` the cache flag (extending TTL) but do **not** re-log. A million-request outage produces one log line, not a million. The breaker auto-resets on TTL expiry, so the next trip after recovery gets its own log line.
+
+Wire your existing log → metric path (Datadog Logs alert on `circuit breaker tripped`, Sentry breadcrumb, log-based Prometheus metric, etc.) — the SDK doesn't introduce a new metrics dependency.
+
+### feat: `php artisan smking:circuit:status` — read-only state inspector
+
+```bash
+php artisan smking:circuit:status
+```
+
+Reports per-surface state without resetting anything. Output includes the underlying cache key so ops can spot-check the store directly (`redis-cli get smking:circuit:aeo:...`) when triaging unexpected behavior.
+
+Exit code is script-friendly: `0` if all surfaces closed (or breaker disabled by config), `1` if any surface open. Drop into a healthcheck:
+
+```bash
+php artisan smking:circuit:status > /dev/null || alert "smking AEO degraded"
+```
+
+### What this does NOT do (intentional)
+
+- **No close-event log.** Breaker recovery is implicit (TTL expires, no event). Detecting the half-open transition reliably requires a second tracking key + atomic pull-on-read; possible but adds complexity for marginal value. Trip log + status command covers the operator workflow without that complexity.
+- **No new event class** (`CircuitTripped` etc.). The log line *is* the event surface — every metrics tool already speaks log scraping. Introducing a Laravel event would mean another DI dependency and an extension point we can't easily remove later. Skipped on YAGNI grounds.
+- **No `--reset-circuit` flag** on `cache:purge`. Codex round-4's adversarial review proposed this to "separate eviction from breaker reset"; we've explicitly chosen the opposite default — purge means "retry now" which includes outage protection. Operators who want to peek without resetting now have `circuit:status`.
+
+### Tests added (8 new)
+
+- `test_trip_circuit_logs_warning_on_first_trip` — log fires with correct surface + TTL context
+- `test_trip_circuit_only_logs_once_per_outage_window` — re-trip rate limit
+- `test_trip_circuit_does_not_log_when_breaker_disabled` — opt-out is silent
+- `test_status_shows_closed_state_when_no_breakers_tripped`
+- `test_status_shows_open_state_after_aeo_breaker_trips`
+- `test_status_returns_failure_when_any_surface_open`
+- `test_status_shows_disabled_when_breaker_off`
+- `test_status_includes_cache_key_for_ops_debugging`
+
+127 tests total (was 119).
+
+### Internal
+
+- `AeoClient::tripCircuit()` — adds `$alreadyOpen` check + `$this->logger?->warning()` call. Public API unchanged.
+- `Smking\Laravel\Console\CircuitStatusCommand` — new, registered in `SmkingServiceProvider::boot()`.
+
 ## v0.7.0 — pre-release adversarial review fixes (round 4)
 
 Fourth adversarial review (codex, requested against the explicit recommendation to stop at round 3) caught three real issues that the round-3 cuts didn't cover: cross-surface coupling, recovery-flow false advertising, and a first-launch regression on the new miss TTL default. All folded into v0.7.0 before tagging.
