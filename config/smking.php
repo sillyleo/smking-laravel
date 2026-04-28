@@ -57,16 +57,18 @@ return [
     */
     'debug' => env('SMKING_DEBUG', null),
 
-    /*
-    |--------------------------------------------------------------------------
-    | Path Filters
-    |--------------------------------------------------------------------------
-    |
-    | Restrict auto-injection to specific URL patterns. Use Laravel's standard
-    | wildcard syntax ("products/*"). When "only" is empty, every HTML
-    | response is eligible (subject to "except").
-    |
-    */
+    // Path filters — both `only` (whitelist, below) and `except`
+    // (blacklist, next block) accept Laravel `Request::is()` patterns
+    // (`products/*`, `admin*`, `/checkout`). Order: `only` is checked
+    // first; `except` is applied to whatever survived. Empty `only`
+    // means "every HTML response is eligible" (subject to `except`).
+
+    // Whitelist for auto-injection. Empty array (default) = full site.
+    // Populate to scope smking to a subset of paths — useful for
+    // soft-launching one URL, opening one section at a time, or
+    // running an A/B with smking on chosen variants and a control
+    // path left untouched. README §"Gradual rollout / A/B comparison"
+    // has worked examples.
     'only' => [
         // 'products/*',
         // 'shop/*',
