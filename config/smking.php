@@ -40,6 +40,14 @@ return [
     */
     'auto_inject' => env('SMKING_AUTO_INJECT', true),
 
+    // v0.7.3: under `php artisan test` / Pest / phpunit, the middleware
+    // short-circuits before calling the smking backend so feature tests
+    // don't time out against an unreachable upstream and don't leak test-
+    // run URLs into production analytics. Flip to true in `.env.testing`
+    // if you want integration tests that actually exercise the full
+    // SDK → backend → cache pipeline.
+    'inject_in_tests' => env('SMKING_INJECT_IN_TESTS', false),
+
     /*
     |--------------------------------------------------------------------------
     | Debug Mode

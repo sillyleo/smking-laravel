@@ -98,6 +98,7 @@ The `<x-smking-meta />` component mirrors `getSmkingMetadata()` from `@smking/ne
 | `api_key` | `env('SMKING_API_KEY')` | Publishable key from the dashboard |
 | `base_url` | _(required, no default)_ | Set `SMKING_BASE_URL` to your smking deployment origin |
 | `auto_inject` | `true` | Register middleware globally |
+| `inject_in_tests` | `false` | When false (v0.7.3+ default), middleware short-circuits under `php artisan test` / Pest so feature tests don't time out against an unreachable backend. Set `SMKING_INJECT_IN_TESTS=true` in `.env.testing` for genuine integration tests |
 | `only` / `except` | see file | Path filters (Laravel wildcard) |
 | `inject.*` | all `true` | Toggle json_ld / meta_description / faq / summary / seo_title / og_title / og_description / og_image / canonical / markdown |
 | `inject.visibility` | `sr_only` | Body-fragment visibility: `sr_only` (default, visually hidden), `visible` (raw, v0.5.x behavior), `noscript` |

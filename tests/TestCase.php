@@ -22,5 +22,9 @@ abstract class TestCase extends Orchestra
         $app['config']->set('smking.api_key', 'pk_test_key');
         $app['config']->set('smking.base_url', 'https://api.test');
         $app['config']->set('smking.cache.enabled', false);
+        // v0.7.3: customer-side default is to short-circuit middleware in
+        // test env. Our own SDK suite genuinely tests the middleware path,
+        // so flip the opt-in on for the duration of these tests.
+        $app['config']->set('smking.inject_in_tests', true);
     }
 }
