@@ -116,6 +116,49 @@ The `<x-smking-meta />` component mirrors `getSmkingMetadata()` from `@smking/ne
 8. **Agent discovery** (v0.5.0+): every HTML response advertises the markdown alternate via `Link: <{url}>; rel="alternate"; type="text/markdown"` (RFC 8288). Appended to any existing Link headers; idempotent if you already wired your own.
 9. **Visually-hidden body fragments by default** (v0.6.0+): auto-injected `summaryHtml` / `faqHtml` are wrapped in an inline-style sr-only `<div>` so they don't pollute SPA layouts where `</body>` injection lands outside `#app`. Microdata stays in the DOM (Googlebot reads it); JSON-LD in `<head>` is the primary AEO signal. Switch with `SMKING_INJECT_VISIBILITY=visible` if you want the v0.5.x behavior. The `<x-smking-aeo />` Blade component is unaffected — explicit placement is always rendered as you wrote it.
 
+## Upgrading
+
+This package is in `v0.x`. Per Composer's caret convention for pre-1.0 packages, **every minor bump (0.5 → 0.6, 0.6 → 0.7) is treated as breaking** — the constraint `"smking/laravel": "^0.6"` resolves to `>=0.6.0 <0.7.0` and `composer update` won't cross into 0.7.
+
+### Cross-minor upgrade (e.g. 0.6 → 0.7)
+
+Edit `composer.json` to bump the constraint, then update:
+
+```bash
+# 1. Bump constraint
+composer require smking/laravel:^0.7
+
+# 2. (optional) refresh published config — see docs/upgrading note below
+php artisan vendor:publish --tag=smking-config --force
+php artisan config:clear
+
+# 3. Verify install
+php artisan smking:doctor
+```
+
+`smking:doctor` (v0.6.3+) shows a "config schema drift" row that lists any new keys present in the package default but missing from your published `config/smking.php` — handy for deciding whether to re-publish.
+
+### In-minor upgrade (patch, e.g. 0.6.1 → 0.6.2)
+
+Patches stay in your existing `^0.X` range — `composer update` is enough:
+
+```bash
+composer update smking/laravel
+```
+
+### Deploying to production
+
+Always commit `composer.lock` to your repo and use `composer install` (NOT `update`) on production deploys:
+
+```bash
+# CI / deploy script
+composer install --no-dev --optimize-autoloader
+```
+
+`composer install` reads the lockfile and installs the exact versions you tested in staging. `composer update` re-resolves and may pull a release into prod that bypassed QA — especially risky while this package is `v0.x` with breaking minors. Always bump in dev, test in staging, then ship the lockfile.
+
+See [CHANGELOG.md](CHANGELOG.md) for what each release changes.
+
 ## Requirements
 
 - PHP 8.1+

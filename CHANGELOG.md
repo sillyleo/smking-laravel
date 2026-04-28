@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.6.3
+
+**Patch**: docs + diagnostics. No behavior changes.
+
+### docs: README "Upgrading" section
+
+New section explaining v0.x caret semantics (`^0.6` = `>=0.6.0 <0.7.0`, minor bumps treated as breaking under Composer pre-1.0 convention) plus `composer install` vs `composer update` guidance for production deploys. Links to CHANGELOG so users can read what changed before bumping minor.
+
+### chore(doctor): config schema drift check
+
+`php artisan smking:doctor` now includes a 7th check that compares the customer's published `config/smking.php` against the package's bundled default. Reports keys present in the package but missing from the user's file — happens after a package upgrade where `vendor:publish` SKIPPED the existing file.
+
+The check is **info-only** (never fails the doctor exit code). Three branches:
+- Config not published → `drift check skipped`
+- Published in sync with package → `in sync with package defaults`
+- Published with stale schema → lists missing keys + re-publish hint
+
+`mergeConfigFrom()` in the service provider already overlays defaults at runtime so missing keys aren't a runtime bug — the check just surfaces "you may want to see what's new".
+
+### Tests added
+
+- `test_doctor_reports_missing_keys_when_published_config_lags`
+- `test_doctor_reports_in_sync_when_published_config_matches_package`
+- `test_doctor_drift_check_is_info_only_never_fails`
+- `test_doctor_drift_check_skips_when_config_not_published`
+
+80 tests total (was 76).
+
+### Internal
+
+- `DoctorCommand::checkConfigSchemaDrift()` + `collectMissingKeys()` + `isAssociative()` — three new private helpers.
+
 ## v0.6.2
 
 **New feature**: middleware now injects a real `<img>` tag in body so SPA-rendered pages have a server-side product image in raw HTML.

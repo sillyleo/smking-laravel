@@ -34,6 +34,7 @@ class DoctorCommand extends Command
     {
         $checks = [
             $this->checkConfigPublished($app),
+            $this->checkConfigSchemaDrift($app),
             $this->checkApiKey(),
             $this->checkBaseUrl(),
             $this->checkMiddlewareInKernel($app),
@@ -79,6 +80,93 @@ class DoctorCommand extends Command
         return file_exists($path)
             ? ['status' => 'pass', 'label' => 'config/smking.php published', 'detail' => $path]
             : ['status' => 'info', 'label' => 'config/smking.php published', 'detail' => 'optional — defaults from package are merged automatically. publish only if you need to edit only/except/inject.* in your repo.'];
+    }
+
+    /**
+     * v0.6.3: surface keys present in the package default config but missing
+     * from the customer's published `config/smking.php`. mergeConfigFrom in
+     * the service provider already overlays defaults at runtime, so missing
+     * keys aren't a runtime bug — but the customer's published file shows
+     * stale schema after a package upgrade, hiding new knobs they may want
+     * to set.
+     *
+     * @return array{status: 'pass'|'fail'|'info', label: string, detail: string}
+     */
+    private function checkConfigSchemaDrift(Application $app): array
+    {
+        $userPath = $app->configPath('smking.php');
+        if (! file_exists($userPath)) {
+            return ['status' => 'info', 'label' => 'Config schema drift', 'detail' => 'config not published — drift check skipped'];
+        }
+
+        $packagePath = __DIR__.'/../../config/smking.php';
+        if (! file_exists($packagePath)) {
+            return ['status' => 'info', 'label' => 'Config schema drift', 'detail' => 'package config not found at '.$packagePath];
+        }
+
+        $user = require $userPath;
+        $package = require $packagePath;
+
+        if (! is_array($user) || ! is_array($package)) {
+            return ['status' => 'info', 'label' => 'Config schema drift', 'detail' => 'config files did not return arrays'];
+        }
+
+        $missing = $this->collectMissingKeys($package, $user);
+
+        if (count($missing) === 0) {
+            return ['status' => 'pass', 'label' => 'Config schema drift', 'detail' => 'in sync with package defaults'];
+        }
+
+        return [
+            'status' => 'info',
+            'label' => 'Config schema drift',
+            'detail' => count($missing).' new key(s) since last publish: '.implode(', ', $missing).'. Re-publish with `php artisan vendor:publish --tag=smking-config --force` (overwrites your file) or copy manually.',
+        ];
+    }
+
+    /**
+     * Recursively diff package keys against user keys; nested associative
+     * arrays recurse into their children, list-style arrays (e.g. `except`)
+     * compare at the top level only — ordering / extending those is the
+     * customer's call.
+     *
+     * @param  array<int|string, mixed>  $package
+     * @param  array<int|string, mixed>  $user
+     * @return list<string>
+     */
+    private function collectMissingKeys(array $package, array $user, string $prefix = ''): array
+    {
+        $missing = [];
+        foreach ($package as $key => $value) {
+            if (! is_string($key)) {
+                continue;
+            }
+            $fullKey = $prefix === '' ? $key : "{$prefix}.{$key}";
+
+            if (! array_key_exists($key, $user)) {
+                $missing[] = $fullKey;
+
+                continue;
+            }
+
+            if (is_array($value) && is_array($user[$key]) && $this->isAssociative($value)) {
+                $missing = array_merge($missing, $this->collectMissingKeys($value, $user[$key], $fullKey));
+            }
+        }
+
+        return $missing;
+    }
+
+    /**
+     * @param  array<int|string, mixed>  $arr
+     */
+    private function isAssociative(array $arr): bool
+    {
+        if ($arr === []) {
+            return false;
+        }
+
+        return array_keys($arr) !== range(0, count($arr) - 1);
     }
 
     /**
