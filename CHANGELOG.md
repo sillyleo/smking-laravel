@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.7.2 — config inline doc for `only` whitelist
+
+Pure-doc patch. The `'only'` whitelist feature has been around since v0.1, but customers asked "where do I configure path whitelisting?" enough times that it became clear `config/smking.php` wasn't surfacing it well — the published config had a 4-line stub with two commented examples and no explanation, so customers reading it cold either missed the feature or had to dig into the package README to understand what the array meant.
+
+v0.7.2 rewrites the `only` block's inline comments to match the existing `except` block's tighter style — short `//` line comments, one paragraph for "what it does", one paragraph for "when you'd use it", no Phpdoc-style header bloat. Customer publishing config and reading it cold now gets the feature in ~5 seconds without leaving the file. Worked examples (soft-launch, A/B comparison, full rollout) stay in README §"Gradual rollout / A/B comparison" — config doc points there for depth.
+
+Also adds a closing line to the SaaS-side install agent prompt mentioning the whitelist option after the verification checklist passes — a one-sentence heads-up, not a tutorial. Agents are explicitly told not to walk customers through it unless asked.
+
+No SDK code or test changes. Customers running `^0.7` who already published config get the new comments next time they re-publish (or by hand-editing).
+
 ## v0.7.1 — circuit breaker observability
 
 Operators reported (rightly) that v0.7.0's circuit breaker was silently effective: when AEO content stopped appearing in production, there was no signal whether the SDK was short-circuiting or whether the upstream was returning empty responses. The only "tool" was `cache:purge`, which has the side-effect of resetting the breaker — so just *checking* state forced you to also reset it. Bad ergonomics.
