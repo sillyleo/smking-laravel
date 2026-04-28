@@ -78,7 +78,13 @@ class InjectAeo
         // `Accept: text/markdown` can discover the alternate from the
         // header (RFC 8288). Cloudflare's isitagentready.com page-level
         // audit explicitly checks this — sites that emit it score higher.
-        if ($flags['markdown'] ?? true) {
+        //
+        // v0.6.1: gate on env presence — if the customer hasn't configured
+        // SMKING_API_KEY + SMKING_BASE_URL yet (e.g. installed in prod
+        // without env yet), advertising a markdown alternate is a lie:
+        // the actual md API call will fail and the agent gets HTML back.
+        // Better to stay silent until config is in place.
+        if (($flags['markdown'] ?? true) && $this->isConfigured()) {
             $this->addMarkdownAlternateLink($response, $request->fullUrl());
         }
 
@@ -539,6 +545,21 @@ class InjectAeo
         $response->headers->set('Vary', $this->mergeVary($existingVary, 'Accept'));
 
         return $response;
+    }
+
+    /**
+     * True when both api_key and base_url are non-empty strings — i.e. the
+     * SDK is actually capable of serving content. Used to gate the
+     * markdown alternate Link header so we don't advertise a capability
+     * the unconfigured prod env can't deliver.
+     */
+    private function isConfigured(): bool
+    {
+        $apiKey = $this->config->get('smking.api_key');
+        $baseUrl = $this->config->get('smking.base_url');
+
+        return is_string($apiKey) && $apiKey !== ''
+            && is_string($baseUrl) && $baseUrl !== '';
     }
 
     /**

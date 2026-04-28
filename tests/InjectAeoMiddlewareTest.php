@@ -1070,6 +1070,41 @@ class InjectAeoMiddlewareTest extends TestCase
         $this->assertStringContainsString('application/ld+json', $html);
     }
 
+    public function test_link_header_skipped_when_api_key_missing(): void
+    {
+        // v0.6.1: don't advertise markdown alternate when env isn't
+        // configured — the md API call would fail and the agent would
+        // get HTML, so the Link header is a lie.
+        config()->set('smking.api_key', '');
+
+        Http::fake();
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('https://shop.example/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response('<html><head></head><body>x</body></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        $this->assertStringNotContainsString('text/markdown', (string) $response->headers->get('Link', ''));
+    }
+
+    public function test_link_header_skipped_when_base_url_missing(): void
+    {
+        config()->set('smking.base_url', '');
+
+        Http::fake();
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('https://shop.example/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response('<html><head></head><body>x</body></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        $this->assertStringNotContainsString('text/markdown', (string) $response->headers->get('Link', ''));
+    }
+
     public function test_link_header_not_emitted_on_markdown_response(): void
     {
         Http::fake([
