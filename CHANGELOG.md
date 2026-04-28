@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.6.1
+
+**Patch**: gate the markdown alternate `Link` header (v0.5.0+) on env presence.
+
+When a customer pushes the SDK to production without setting `SMKING_API_KEY` + `SMKING_BASE_URL` yet, the middleware previously still emitted `Link: <{url}>; rel="alternate"; type="text/markdown"`. Agents that followed the link sent `Accept: text/markdown`, the markdown API call fell open to HTML, and the agent received HTML — a misleading discovery signal that also hurts Cloudflare's `servesMarkdown` audit check.
+
+v0.6.1: the Link header is skipped when either `api_key` or `base_url` is empty. The rest of fail-open behavior is unchanged — middleware still emits `X-Smking-Status` headers so doctor + `curl -I` install verification work whether env is configured or not.
+
+### Tests added
+
+- `test_link_header_skipped_when_api_key_missing`
+- `test_link_header_skipped_when_base_url_missing`
+
+71 tests total (was 69).
+
+### Internal
+
+- `InjectAeo::isConfigured()` — new private helper.
+
 ## v0.6.0
 
 **Visual change**: middleware-injected `summaryHtml` / `faqHtml` body fragments default to **visually hidden** (sr-only inline-style wrapper). The DOM still contains the microdata; the user no longer sees an unstyled section at the bottom of the page.
