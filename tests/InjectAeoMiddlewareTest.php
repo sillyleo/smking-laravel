@@ -582,4 +582,246 @@ class InjectAeoMiddlewareTest extends TestCase
         $this->assertStringContainsString('data-smking-injected="1"', $html);
         $this->assertSame('not_found', $response->headers->get('X-Smking-Status'));
     }
+
+    // ── Markdown for Agents (v0.4.0) ──────────────────────────────
+
+    public function test_serves_markdown_when_agent_sends_accept_text_markdown(): void
+    {
+        Http::fake([
+            '*api/v1/public/aeo*' => Http::response(['status' => 'ready'], 200),
+            '*api/v1/public/md*' => Http::response("# Widget\n\n## Summary\n\nGreat product.\n", 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET', server: ['HTTP_ACCEPT' => 'text/markdown']);
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head><title>X</title></head><body><h1>Product</h1></body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $body = (string) $response->getContent();
+
+        $this->assertStringContainsString('# Widget', $body);
+        $this->assertStringContainsString('## Summary', $body);
+        $this->assertStringNotContainsString('<html', $body);
+        $this->assertStringContainsString('text/markdown', (string) $response->headers->get('Content-Type'));
+        $this->assertStringContainsString('Accept', (string) $response->headers->get('Vary'));
+        $this->assertSame('ready', $response->headers->get('X-Smking-Status'));
+    }
+
+    public function test_falls_back_to_html_when_markdown_api_returns_404(): void
+    {
+        Http::fake([
+            '*api/v1/public/aeo*' => Http::response(['status' => 'ready', 'jsonLd' => ['@type' => 'Product', 'name' => 'W']], 200),
+            '*api/v1/public/md*' => Http::response('Not found', 404),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET', server: ['HTTP_ACCEPT' => 'text/markdown']);
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head><title>X</title></head><body><h1>Product</h1></body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $body = (string) $response->getContent();
+
+        $this->assertStringContainsString('<html', $body);
+        $this->assertStringContainsString('application/ld+json', $body);
+        $this->assertStringContainsString('text/html', (string) $response->headers->get('Content-Type'));
+    }
+
+    public function test_serves_html_when_accept_prefers_html_over_markdown(): void
+    {
+        Http::fake([
+            '*api/v1/public/aeo*' => Http::response(['status' => 'ready'], 200),
+            '*api/v1/public/md*' => Http::response("# Should not appear\n", 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        // text/html;q=0.9 ranks above text/markdown;q=0.8
+        $request = Request::create('/products/widget', 'GET', server: [
+            'HTTP_ACCEPT' => 'text/html;q=0.9, text/markdown;q=0.8',
+        ]);
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $body = (string) $response->getContent();
+
+        $this->assertStringContainsString('<html', $body);
+        $this->assertStringNotContainsString('Should not appear', $body);
+        $this->assertStringNotContainsString('text/markdown', (string) $response->headers->get('Content-Type'));
+        Http::assertNotSent(function ($request) {
+            return str_contains($request->url(), '/api/v1/public/md');
+        });
+    }
+
+    public function test_serves_markdown_when_higher_q_than_html(): void
+    {
+        Http::fake([
+            '*api/v1/public/aeo*' => Http::response(['status' => 'ready'], 200),
+            '*api/v1/public/md*' => Http::response("# Markdown wins\n", 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET', server: [
+            'HTTP_ACCEPT' => 'text/markdown;q=0.9, text/html;q=0.8',
+        ]);
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $this->assertStringContainsString('Markdown wins', (string) $response->getContent());
+        $this->assertStringContainsString('text/markdown', (string) $response->headers->get('Content-Type'));
+    }
+
+    public function test_browser_default_accept_does_not_trigger_markdown(): void
+    {
+        Http::fake([
+            '*api/v1/public/aeo*' => Http::response(['status' => 'ready'], 200),
+            '*api/v1/public/md*' => Http::response("# Should not appear\n", 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        // Typical Chrome / Firefox default
+        $request = Request::create('/products/widget', 'GET', server: [
+            'HTTP_ACCEPT' => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        ]);
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $body = (string) $response->getContent();
+
+        $this->assertStringContainsString('<html', $body);
+        $this->assertStringNotContainsString('Should not appear', $body);
+        Http::assertNotSent(function ($request) {
+            return str_contains($request->url(), '/api/v1/public/md');
+        });
+    }
+
+    public function test_inject_markdown_false_disables_negotiation(): void
+    {
+        config()->set('smking.inject.markdown', false);
+
+        Http::fake([
+            '*api/v1/public/aeo*' => Http::response(['status' => 'ready'], 200),
+            '*api/v1/public/md*' => Http::response("# Should not appear\n", 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET', server: ['HTTP_ACCEPT' => 'text/markdown']);
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $body = (string) $response->getContent();
+
+        $this->assertStringContainsString('<html', $body);
+        $this->assertStringNotContainsString('Should not appear', $body);
+        Http::assertNotSent(function ($request) {
+            return str_contains($request->url(), '/api/v1/public/md');
+        });
+    }
+
+    public function test_markdown_skipped_when_auto_inject_false(): void
+    {
+        config()->set('smking.auto_inject', false);
+
+        Http::fake([
+            '*api/v1/public/md*' => Http::response("# Should not appear\n", 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET', server: ['HTTP_ACCEPT' => 'text/markdown']);
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        // auto_inject=false short-circuits BEFORE the markdown branch — body
+        // unchanged, X-Smking-Status: disabled per existing v0.2.0 contract.
+        $this->assertStringContainsString('<html', (string) $response->getContent());
+        $this->assertSame('disabled', $response->headers->get('X-Smking-Status'));
+        Http::assertNotSent(function ($request) {
+            return str_contains($request->url(), '/api/v1/public/md');
+        });
+    }
+
+    public function test_markdown_request_calls_md_endpoint_with_key_and_path(): void
+    {
+        Http::fake([
+            '*api/v1/public/aeo*' => Http::response(['status' => 'ready'], 200),
+            '*api/v1/public/md*' => Http::response("# OK\n", 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET', server: ['HTTP_ACCEPT' => 'text/markdown']);
+        $middleware->handle($request, function () {
+            return new Response('<html><head></head><body>x</body></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        Http::assertSent(function ($request) {
+            $url = $request->url();
+            return str_contains($url, '/api/v1/public/md')
+                && str_contains($url, 'key=pk_test_key')
+                && str_contains($url, 'path=%2Fproducts%2Fwidget');
+        });
+    }
+
+    public function test_markdown_branch_runs_before_html_fragment_guard(): void
+    {
+        Http::fake([
+            '*api/v1/public/aeo*' => Http::response(['status' => 'ready'], 200),
+            '*api/v1/public/md*' => Http::response("# Markdown wins\n", 200),
+        ]);
+
+        // HTMX-style fragment served as text/html. The fragment guard only
+        // protects the HTML rewrite path from corrupting partial chunks.
+        // For Accept: text/markdown the agent doesn't want any HTML at all,
+        // so markdown should take over regardless of whether the upstream
+        // body is a fragment or a full document.
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/widget-fragment', 'GET', server: ['HTTP_ACCEPT' => 'text/markdown']);
+        $response = $middleware->handle($request, function () {
+            return new Response('<div>just a fragment</div>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        $this->assertStringContainsString('Markdown wins', (string) $response->getContent());
+        $this->assertStringContainsString('text/markdown', (string) $response->headers->get('Content-Type'));
+    }
 }

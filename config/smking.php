@@ -129,6 +129,14 @@ return [
         'og_description' => true,
         'og_image' => true,
         'canonical' => true,
+
+        // Markdown for Agents (v0.4.0+). When an autonomous agent / browser
+        // agent / MCP client sends `Accept: text/markdown`, the middleware
+        // serves a structured markdown rendition of the path's AEO content
+        // (FAQ + summary + meta) instead of the HTML page. Set false to
+        // always serve HTML regardless of Accept — useful if you want to
+        // wire your own content negotiation in a controller.
+        'markdown' => true,
     ],
 
     /*
