@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.3.0
+
+**Breaking change**: SEO injection switches from "fill gaps" to "always override".
+
+### Why
+
+v0.2.x detected existing host markup (`<title>`, `<meta name="description">`, og:*, canonical) and skipped injection to coexist with Yoast / Rank Math / hand-written meta. In practice smking customers install us because we are their SEO/AEO solution — Yoast equivalents are competitors, not coexisting partners. The "fill gaps" rule had a worse failure mode than expected: starter Blade templates almost universally write `<meta name="description" content="{{ $foo ?? 'placeholder' }}" />` fallbacks, which v0.2.x mistook for real host content and refused to override. Result: customers ran `composer require smking/laravel`, generated AEO content via the SaaS dashboard, audited their site, and saw no improvement — the SDK was working perfectly but invisibly blocked by their own template fallback.
+
+### Behavior change
+
+For every enabled tag, the middleware now **strips** any matching host markup (attribute-order-insensitive) before injecting smking's version. The document ends up with exactly one of each:
+
+- `<meta name="description">` — strip + inject
+- `<title>` — strip + inject (limit 1, won't eat stray titles inside `<noscript>` / `<template>`)
+- `<meta property="og:title">` — strip + inject
+- `<meta property="og:description">` — strip + inject
+- `<meta property="og:image">` — strip + inject
+- `<link rel="canonical">` — strip + inject
+
+Per-tag opt-out is unchanged: `config('smking.inject.{tag}', false)` still disables individual tags entirely (e.g. when you render meta yourself via `<x-smking-meta />` or the `Smking::metaFor()` facade).
+
+### Migration
+
+No code changes required for typical installs. If you intentionally relied on v0.2.x preserving your host meta:
+
+- **Render meta yourself**: set `config('smking.inject.{tag}', false)` for each tag you control, or use the `<x-smking-meta />` Blade component.
+- **Disable injection entirely**: set `SMKING_AUTO_INJECT=false` (verification headers still emit so doctor + `curl -I` work).
+
+### Tests changed
+
+- Removed: `test_does_not_override_existing_title_or_canonical`, three `test_respects_existing_*_with_reversed_attribute_order` tests
+- Added (inverse coverage): `test_overrides_existing_title_and_canonical`, three `test_overrides_existing_*_with_reversed_attribute_order` tests
+- Each new test asserts `substr_count($html, '<title') === 1` / `preg_match_all('/rel="canonical"/i') === 1` so the document never ends up with duplicates after strip+inject.
+
+50 tests total (unchanged).
+
+### Internal
+
+- `tagHasAttribute()` removed from `InjectAeo` middleware.
+- New helpers: `stripVoidTag()` (meta / link), `stripTitle()` (paired title element).
+
 ## v0.2.4
 
 External audit (`docs/audit-smking-laravel.md`) caught two **High** severity correctness bugs that all four prior releases (v0.2.0 → v0.2.3) shipped. Fixing both.

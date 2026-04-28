@@ -193,54 +193,41 @@ class InjectAeo
             }
         }
 
+        // v0.3.0 — always override (was: fill gaps). Customers install smking
+        // because they want our generated SEO/AEO content live, so hardcoded
+        // Blade fallbacks (`<meta name="description" content="App Name">`) and
+        // competitor output should be replaced, not deferred to. We strip any
+        // existing tag (attribute-order-insensitive) before injecting ours, so
+        // the document only ever ends up with one of each.
         if (($flags['meta_description'] ?? true) && $aeo->metaDescription !== '') {
-            if (! $this->tagHasAttribute($html, 'meta', 'name', 'description')) {
-                $headFragments[] = '<meta name="description" content="'.e($aeo->metaDescription).'" data-smking="aeo">';
-            }
+            $html = $this->stripVoidTag($html, 'meta', 'name', 'description');
+            $headFragments[] = '<meta name="description" content="'.e($aeo->metaDescription).'" data-smking="aeo">';
         }
 
-        // SEO meta. Each tag has independent conflict detection — we only
-        // write a tag the host application hasn't written itself, so client
-        // sites that already use Yoast-equivalent solutions (or write meta in
-        // their own Blade layout) keep their tags as the source of truth.
-        // Mirrors WP Plugin §4 filter coexistence + Next.js mergeMetadata
-        // strategy; the philosophy is "fill gaps, never override".
-        //
-        // Conflict detection is attribute-order-insensitive: we scan every
-        // <meta>/<link> tag and look for the identifying attribute pair
-        // anywhere in it, so `<meta content="…" name="description">`
-        // (content first) is recognized just like `<meta name="description"
-        // content="…">`. v0.2.3 and earlier matched only when the
-        // identifying attribute came first, missing common host templates.
         if ($aeo->seo !== null) {
             if (($flags['seo_title'] ?? true) && $aeo->seo->title !== null) {
-                if (! preg_match('/<title\b[^>]*>/i', $html)) {
-                    $headFragments[] = '<title data-smking="seo">'.e($aeo->seo->title).'</title>';
-                }
+                $html = $this->stripTitle($html);
+                $headFragments[] = '<title data-smking="seo">'.e($aeo->seo->title).'</title>';
             }
 
             if (($flags['og_title'] ?? true) && $aeo->seo->ogTitle !== null) {
-                if (! $this->tagHasAttribute($html, 'meta', 'property', 'og:title')) {
-                    $headFragments[] = '<meta property="og:title" content="'.e($aeo->seo->ogTitle).'" data-smking="seo">';
-                }
+                $html = $this->stripVoidTag($html, 'meta', 'property', 'og:title');
+                $headFragments[] = '<meta property="og:title" content="'.e($aeo->seo->ogTitle).'" data-smking="seo">';
             }
 
             if (($flags['og_description'] ?? true) && $aeo->seo->ogDescription !== null) {
-                if (! $this->tagHasAttribute($html, 'meta', 'property', 'og:description')) {
-                    $headFragments[] = '<meta property="og:description" content="'.e($aeo->seo->ogDescription).'" data-smking="seo">';
-                }
+                $html = $this->stripVoidTag($html, 'meta', 'property', 'og:description');
+                $headFragments[] = '<meta property="og:description" content="'.e($aeo->seo->ogDescription).'" data-smking="seo">';
             }
 
             if (($flags['og_image'] ?? true) && $aeo->seo->ogImageUrl !== null) {
-                if (! $this->tagHasAttribute($html, 'meta', 'property', 'og:image')) {
-                    $headFragments[] = '<meta property="og:image" content="'.e($aeo->seo->ogImageUrl).'" data-smking="seo">';
-                }
+                $html = $this->stripVoidTag($html, 'meta', 'property', 'og:image');
+                $headFragments[] = '<meta property="og:image" content="'.e($aeo->seo->ogImageUrl).'" data-smking="seo">';
             }
 
             if (($flags['canonical'] ?? true) && $aeo->seo->canonicalUrl !== null) {
-                if (! $this->tagHasAttribute($html, 'link', 'rel', 'canonical')) {
-                    $headFragments[] = '<link rel="canonical" href="'.e($aeo->seo->canonicalUrl).'" data-smking="seo">';
-                }
+                $html = $this->stripVoidTag($html, 'link', 'rel', 'canonical');
+                $headFragments[] = '<link rel="canonical" href="'.e($aeo->seo->canonicalUrl).'" data-smking="seo">';
             }
         }
 
@@ -345,37 +332,48 @@ class InjectAeo
     }
 
     /**
-     * Attribute-order-insensitive check: does `$html` contain a `<$tagName>`
-     * tag whose attribute `$attrName` equals `$attrValue`?
+     * Strip <meta>/<link> (void) elements whose `$attrName` equals
+     * `$attrValue`, attribute-order-insensitive. Used before injecting
+     * smking's version of meta description / og:* / canonical, so the
+     * document only ever has one such tag — ours.
      *
-     * Replaces the previous regex-first detection, which only matched when
-     * the identifying attribute was the first one after the tag name —
-     * missing valid host markup like `<meta content="…" name="description">`.
+     * v0.3.0: replaces v0.2.x's tagHasAttribute() detection. The previous
+     * "fill gaps" behavior skipped injection when the host page already
+     * wrote the tag; now we strip the host tag and inject ours.
      */
-    private function tagHasAttribute(
+    private function stripVoidTag(
         string $html,
         string $tagName,
         string $attrName,
         string $attrValue,
-    ): bool {
+    ): string {
         $tagPattern = '/<'.preg_quote($tagName, '/').'\b[^>]*>/i';
-        if (preg_match_all($tagPattern, $html, $matches) === 0) {
-            return false;
-        }
-
         $attrPattern = '/\b'
             .preg_quote($attrName, '/')
             .'\s*=\s*["\']'
             .preg_quote($attrValue, '/')
             .'["\']/i';
 
-        foreach ($matches[0] as $tag) {
-            if (preg_match($attrPattern, $tag) === 1) {
-                return true;
-            }
-        }
+        $result = preg_replace_callback(
+            $tagPattern,
+            static fn (array $match): string => preg_match($attrPattern, $match[0]) === 1 ? '' : $match[0],
+            $html,
+        );
 
-        return false;
+        return $result ?? $html;
+    }
+
+    /**
+     * Strip the first <title>...</title> from the document. Title has no
+     * identifying attribute (one per document by spec), so we remove the
+     * existing one before injecting smking's. Limit 1 to avoid eating
+     * stray <title> inside <noscript> / <template> on malformed pages.
+     */
+    private function stripTitle(string $html): string
+    {
+        $result = preg_replace('/<title\b[^>]*>.*?<\/title>/is', '', $html, 1);
+
+        return $result ?? $html;
     }
 
     /**

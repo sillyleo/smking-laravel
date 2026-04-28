@@ -117,10 +117,13 @@ return [
         'faq_html' => true,
         'summary_html' => true,
 
-        // SEO meta tags. All injectors detect existing tags first and skip
-        // when the host page already writes them — set false to disable
-        // entirely (e.g. when you render meta yourself via <x-smking-meta />
-        // or the Smking::metaFor() facade in your Blade layout).
+        // SEO meta tags. v0.3.0+: every enabled tag is ALWAYS written —
+        // smking is the source of truth. Any existing host markup for the
+        // same tag (`<meta name="description">`, `<title>`, og:*, canonical)
+        // is stripped first, then ours is injected. Set false on individual
+        // tags to disable entirely (e.g. when you render that meta yourself
+        // via <x-smking-meta /> or the Smking::metaFor() facade in your
+        // Blade layout).
         'seo_title' => true,
         'og_title' => true,
         'og_description' => true,
