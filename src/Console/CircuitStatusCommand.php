@@ -61,8 +61,15 @@ class CircuitStatusCommand extends Command
             $isOpen = $store->has($info['key']);
             if ($isOpen) {
                 $anyOpen = true;
+                // Configured TTL is shown for context, NOT remaining TTL —
+                // Laravel's Cache contract has no portable `ttl($key)`
+                // method, and the breaker auto-resets to 60s on every
+                // re-trip during a continuing outage, so "remaining" is
+                // a moving target anyway. Re-run this command in a few
+                // seconds to confirm whether the breaker actually
+                // cleared, instead of relying on a static countdown.
                 $this->line(sprintf(
-                    '  %-3s (%s): <fg=red>OPEN</> — re-check after configured TTL (%ds)',
+                    '  %-3s (%s): <fg=red>OPEN</> (configured TTL %ds; re-run to confirm recovery)',
                     $surface,
                     $info['label'],
                     $configuredTtl,

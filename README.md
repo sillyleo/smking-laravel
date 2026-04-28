@@ -253,14 +253,19 @@ smking circuit breaker status:
 Recovery: wait for TTL, or `php artisan smking:cache:purge <path>` / `--product-id=N` to force-clear.
 ```
 
-The trip itself is logged at `warning` level the moment it fires (one log line per outage window — rate-limited so a million-request burst doesn't spam):
+The breaker also logs trip + close events through the configured `LoggerInterface`:
 
 ```
 [warning] smking: circuit breaker tripped for aeo surface
   context: {"surface":"aeo","ttl_seconds":60,"key":"smking:circuit:aeo:..."}
+
+[info] smking: circuit closed for aeo surface
+  context: {"surface":"aeo"}
 ```
 
-Wire your usual log → metric path (Datadog Logs / Sentry / etc.) to alert on this string when you want a paging trigger instead of a polling status check.
+The trip log is rate-limited to one line per outage window (a million-request burst produces one log, not a million). The close log fires once on the first successful upstream call after recovery — implemented via an atomic tombstone pull, so concurrent recovery requests log at most once.
+
+Wire your usual log → metric path (Datadog Logs / Sentry / etc.) to alert on either string when you want a paging trigger instead of a polling status check.
 
 ## Upgrading
 

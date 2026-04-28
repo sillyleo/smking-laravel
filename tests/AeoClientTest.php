@@ -584,6 +584,99 @@ class AeoClientTest extends TestCase
         );
     }
 
+    public function test_circuit_close_logs_after_half_open_recovery(): void
+    {
+        // v0.7.1 round-2: when upstream comes back after an outage, the
+        // first successful response should emit a "circuit closed" log so
+        // ops sees the recovery moment in the log stream — without having
+        // to poll `circuit:status` to notice.
+        config()->set('smking.cache.enabled', true);
+        $handler = $this->swapInTestLogger();
+        $client = $this->app->make(AeoClient::class);
+
+        // Use a sequence so the same URL returns 503 first, then 200.
+        // Http::fake() calls are additive (not replacing), so calling
+        // fake() twice would leave the 503 stub matching first.
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::sequence()
+                ->push('broken', 503)
+                ->push(['status' => 'ready'], 200),
+        ]);
+
+        // 1st call: 5xx trips the breaker + plants tombstone + warning log
+        $client->forPath('/a');
+
+        // Force the breaker key to expire (simulate TTL passage). The
+        // tombstone (5× TTL) is still alive — that's the whole point.
+        $store = $this->app->make(\Illuminate\Contracts\Cache\Repository::class);
+        $store->forget($client->cacheKeyPrefixes()['circuit_aeo']);
+
+        // Sanity: tombstone must still be present after we forget the
+        // breaker key. If this fails, the tombstone was never written or
+        // shares a backing store with the breaker.
+        $this->assertTrue(
+            $store->has($client->cacheKeyPrefixes()['circuit_aeo'].':tombstone'),
+            'tombstone must outlive the breaker key (it is what enables close detection)'
+        );
+
+        // 2nd call after recovery: upstream healthy → ready response →
+        // maybeLogCircuitClosed pulls tombstone → info log.
+        $client->forPath('/b');
+
+        $this->assertTrue(
+            $handler->hasInfoThatContains('circuit closed for aeo surface'),
+            'half-open success after a previous trip must emit a close log'
+        );
+    }
+
+    public function test_circuit_close_log_only_fires_once_per_recovery(): void
+    {
+        // Tombstone is atomic-pulled — multiple successful calls after
+        // the same recovery must only log "closed" once. Otherwise a busy
+        // site would re-log every ready response in the same minute.
+        config()->set('smking.cache.enabled', true);
+        $handler = $this->swapInTestLogger();
+        $client = $this->app->make(AeoClient::class);
+
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::sequence()
+                ->push('broken', 503)
+                ->push(['status' => 'ready'], 200)
+                ->push(['status' => 'ready'], 200),
+        ]);
+
+        $client->forPath('/a'); // trip
+
+        $store = $this->app->make(\Illuminate\Contracts\Cache\Repository::class);
+        $store->forget($client->cacheKeyPrefixes()['circuit_aeo']);
+
+        $client->forPath('/b'); // first recovery — log fires
+        $client->forPath('/c'); // second recovery — tombstone already pulled, NO log
+
+        $closeLogs = array_filter(
+            $handler->getRecords(),
+            fn ($r) => str_contains((string) $r['message'], 'circuit closed'),
+        );
+        $this->assertCount(1, $closeLogs, 'tombstone pull must be at-most-once per recovery cycle');
+    }
+
+    public function test_circuit_close_log_does_not_fire_when_no_prior_trip(): void
+    {
+        // Sanity: a successful call without a previous trip must NOT
+        // log "closed" — that would just be log spam on every healthy
+        // upstream response.
+        config()->set('smking.cache.enabled', true);
+        $handler = $this->swapInTestLogger();
+
+        Http::fake(['api.test/api/v1/public/aeo' => Http::response(['status' => 'ready'], 200)]);
+        $this->app->make(AeoClient::class)->forPath('/healthy');
+
+        $this->assertFalse(
+            $handler->hasInfoThatContains('circuit closed'),
+            'close log MUST NOT fire when no prior trip happened'
+        );
+    }
+
     private function swapInTestLogger(): \Monolog\Handler\TestHandler
     {
         $handler = new \Monolog\Handler\TestHandler;
