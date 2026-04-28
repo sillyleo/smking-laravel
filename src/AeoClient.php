@@ -47,6 +47,114 @@ class AeoClient
     }
 
     /**
+     * Fetch markdown rendition of a path's AEO content for agent clients
+     * (autonomous buyers, browser agents, MCP clients) that send
+     * `Accept: text/markdown`. Returns the markdown body or null when the
+     * backend has no ready content for this path / API is unreachable.
+     *
+     * Result is cached separately from forPath() under a `smking:md:` prefix
+     * so the two never collide on cache keys (one stores AeoResponse, the
+     * other a string). Cache namespace still rotates with api_key + base_url
+     * the same way forPath() does.
+     */
+    public function getMarkdown(string $path): ?string
+    {
+        return $this->rememberMarkdown($path, function () use ($path): ?string {
+            return $this->fetchMarkdown($path);
+        });
+    }
+
+    private function fetchMarkdown(string $path): ?string
+    {
+        $apiKey = $this->apiKey();
+        if ($apiKey === null) {
+            return null;
+        }
+
+        if ($this->baseUrl() === null) {
+            $this->logger?->warning('smking: SMKING_BASE_URL is not configured; set it in your .env to enable markdown rendering.');
+
+            return null;
+        }
+
+        try {
+            $response = $this->http
+                ->timeout((int) $this->config->get('smking.timeout', 3))
+                ->withHeaders(['Accept' => 'text/markdown'])
+                ->get($this->endpoint('/api/v1/public/md'), [
+                    'key' => $apiKey,
+                    'path' => $path,
+                ]);
+        } catch (Throwable $e) {
+            $this->logger?->warning('smking: markdown fetch failed', [
+                'message' => $e->getMessage(),
+                'path' => $path,
+            ]);
+
+            return null;
+        }
+
+        if (! $response->successful()) {
+            return null;
+        }
+
+        $body = $response->body();
+
+        return $body !== '' ? $body : null;
+    }
+
+    /**
+     * @param  callable(): ?string  $resolver
+     */
+    private function rememberMarkdown(string $path, callable $resolver): ?string
+    {
+        $cacheConfig = $this->config->get('smking.cache', []);
+        $enabled = (bool) ($cacheConfig['enabled'] ?? true);
+        $ttl = (int) ($cacheConfig['ttl'] ?? 3600);
+
+        if (! $enabled || $ttl <= 0) {
+            return $resolver();
+        }
+
+        $store = $cacheConfig['store'] ?? null;
+        $repository = $store ? $this->cache->store($store) : $this->cache->store();
+
+        $namespace = substr(
+            hash('sha256', ($this->apiKey() ?? '').'|'.($this->baseUrl() ?? '')),
+            0,
+            12,
+        );
+        // Independent prefix from forPath() — different value type (string
+        // vs AeoResponse) means they must never share cache keys.
+        $cacheKey = ($cacheConfig['markdown_prefix'] ?? 'smking:md:').$namespace.':'.http_build_query(['path' => $path]);
+
+        $cached = $repository->get($cacheKey);
+        if (is_string($cached)) {
+            return $cached;
+        }
+        // Cached miss is encoded as the literal `false` so we don't re-hit
+        // the API on every request to a path the backend hasn't crawled
+        // yet. TTL matches not_found_ttl from forPath() — short, so the
+        // first-ready response surfaces quickly.
+        if ($cached === false) {
+            return null;
+        }
+
+        $result = $resolver();
+
+        if ($result === null) {
+            $writeTtl = min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 30));
+            $repository->put($cacheKey, false, $writeTtl);
+
+            return null;
+        }
+
+        $repository->put($cacheKey, $result, $ttl);
+
+        return $result;
+    }
+
+    /**
      * @param  array{path?: string, url?: ?string, product_id?: int}  $body
      */
     private function discover(array $body): AeoResponse

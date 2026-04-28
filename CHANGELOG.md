@@ -1,5 +1,67 @@
 # Changelog
 
+## v0.4.0
+
+**New feature**: Markdown for Agents — content negotiation for autonomous agent clients.
+
+### Why
+
+When an autonomous agent (browser agent, MCP client, ChatGPT-style buyer) hits a product page, parsing through a full HTML document with nav, footer, scripts, and visual chrome is wasteful — agents only need the decision-relevant facts. The Cloudflare `isitagentready.com` audit explicitly checks for this content negotiation, scoring sites higher when they serve a markdown rendition for `Accept: text/markdown`. Without SDK support this was a per-controller manual fix; v0.4.0 makes it middleware-level so install-only customers get it for free.
+
+### Behavior
+
+The middleware now negotiates on `Accept` before the HTML rewrite path runs:
+
+- Browser request (`Accept: text/html, ...`) — unchanged. HTML rewrite as v0.3.0.
+- Agent request (`Accept: text/markdown`, or `text/markdown` with q-value ≥ html / *\/*) — middleware fetches `/api/v1/public/md?key=...&path=...` from your smking deployment and replaces the response body with the markdown rendition. `Content-Type` becomes `text/markdown; charset=utf-8`. `Vary: Accept` is added so shared caches don't cross-pollinate.
+
+Markdown body is the AEO content already in your `product_content` table — title, AI summary, meta description, FAQ — assembled by the SaaS `/api/v1/public/md` route. No extra crawl happens.
+
+### First-request fallback
+
+If the agent hits a path the SaaS hasn't crawled yet (`/api/v1/public/md` returns 404), the middleware falls through to HTML so the agent gets *something* this turn. The same request also triggers the existing `forPath()` background crawl (no extra API call), so the second agent request typically gets the markdown.
+
+### Quality-aware Accept parsing
+
+`wantsMarkdown()` parses Accept properly — q-values, multiple media types, listing order for ties. Browser default `Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8` does NOT trigger markdown (HTML wins by being first at q=1.0). Explicit `Accept: text/markdown` does.
+
+### Config
+
+New `inject.markdown` flag (default `true`):
+
+```php
+// config/smking.php
+'inject' => [
+    // ...existing flags...
+    'markdown' => true, // set false to always serve HTML
+],
+```
+
+Set `false` if you want to wire your own content negotiation in a controller — middleware will then ignore `Accept: text/markdown` and serve HTML as in v0.3.x.
+
+### Cache
+
+Markdown responses cache under their own key prefix (`smking:md:`) so they never collide with `forPath()`'s cached `AeoResponse` (different value types, different TTL semantics). Cache namespace still rotates on (api_key, base_url) change, same as v0.2.3+. Negative cache hits (404 from md API) use the short `not_found_ttl` so a freshly-crawled path becomes available within ~30 seconds.
+
+### Tests added
+
+- `test_serves_markdown_when_agent_sends_accept_text_markdown` — happy path
+- `test_falls_back_to_html_when_markdown_api_returns_404` — first-time miss
+- `test_serves_html_when_accept_prefers_html_over_markdown` — q-value precedence
+- `test_serves_markdown_when_higher_q_than_html` — markdown q-value wins
+- `test_browser_default_accept_does_not_trigger_markdown` — Chrome / Firefox safe
+- `test_inject_markdown_false_disables_negotiation` — opt-out flag
+- `test_markdown_skipped_when_auto_inject_false` — auto_inject short-circuit precedence
+- `test_markdown_request_calls_md_endpoint_with_key_and_path` — request shape
+- `test_markdown_branch_runs_before_html_fragment_guard` — agent gets md even on fragment routes
+
+59 tests total (was 50).
+
+### Internal
+
+- `AeoClient::getMarkdown()` — new public method.
+- `InjectAeo::wantsMarkdown()` / `respondWithMarkdown()` / `mergeVary()` — new private helpers.
+
 ## v0.3.0
 
 **Breaking change**: SEO injection switches from "fill gaps" to "always override".

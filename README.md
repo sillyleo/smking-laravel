@@ -27,6 +27,7 @@ That's it — the middleware auto-registers. Every HTML GET response now picks u
 
 - **AEO** — JSON-LD, FAQ/summary blocks (for ChatGPT, Perplexity, Google AI)
 - **SEO** — `<title>`, `og:*`, `twitter:*`, `<link rel="canonical">` (for Google snippet + social shares)
+- **Markdown for Agents** (v0.4.0+) — autonomous agents requesting `Accept: text/markdown` get a structured markdown rendition of the page (title + summary + meta + FAQ) instead of HTML. Boosts your Cloudflare Agent Readiness score.
 
 smking is the source of truth for SEO/AEO meta. Any existing `<title>`, `<meta name="description">`, `og:*`, or `<link rel="canonical">` in your layout is stripped and replaced with smking's version (v0.3.0+). To keep a tag under your control, disable it via `config('smking.inject.{tag}', false)` or render it yourself with the `<x-smking-meta />` Blade component.
 
@@ -97,7 +98,7 @@ The `<x-smking-meta />` component mirrors `getSmkingMetadata()` from `@smking/ne
 | `base_url` | _(required, no default)_ | Set `SMKING_BASE_URL` to your smking deployment origin |
 | `auto_inject` | `true` | Register middleware globally |
 | `only` / `except` | see file | Path filters (Laravel wildcard) |
-| `inject.*` | all `true` | Toggle json_ld / meta_description / faq / summary / seo_title / og_title / og_description / og_image / canonical |
+| `inject.*` | all `true` | Toggle json_ld / meta_description / faq / summary / seo_title / og_title / og_description / og_image / canonical / markdown |
 | `cache.ttl` | `3600` | Seconds; `0` disables |
 | `timeout` | `3` | HTTP timeout in seconds |
 
@@ -109,6 +110,7 @@ The `<x-smking-meta />` component mirrors `getSmkingMetadata()` from `@smking/ne
 4. **Always override** (v0.3.0+): every enabled SEO tag (`<title>`, `og:*`, `canonical`, `meta description`) gets written by smking. Any matching host markup is stripped first (attribute-order-insensitive) so the document only ever has one of each. To keep a tag under your control, set `config('smking.inject.{tag}', false)` or render it yourself.
 5. Unknown paths are registered for background crawling — next request will serve content.
 6. Responses are cached per path in Laravel's cache. Pending/error states fail open.
+7. **Agent content negotiation** (v0.4.0+): when `Accept: text/markdown` is preferred over `text/html` (q-value-aware), the middleware fetches `/api/v1/public/md` and replaces the body with markdown. `Vary: Accept` is added so caches stay consistent. First-time misses fall through to HTML and trigger the same background crawl.
 
 ## Requirements
 

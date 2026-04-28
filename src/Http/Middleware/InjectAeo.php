@@ -57,6 +57,22 @@ class InjectAeo
         $aeo = $this->client->forPath($path, $request->fullUrl());
         $this->emitHeaders($response, $aeo->status, $path);
 
+        // Markdown for Agents (RFC-style content negotiation, v0.4.0+).
+        // When an autonomous agent / browser-agent / MCP client requests
+        // `Accept: text/markdown`, we serve the path's AEO content as a
+        // structured markdown document instead of HTML. The forPath() call
+        // above already registered the path for background crawling, so a
+        // first-time miss here recovers on the next request.
+        $flags = (array) $this->config->get('smking.inject', []);
+        if (($flags['markdown'] ?? true) && $this->wantsMarkdown($request)) {
+            $markdown = $this->client->getMarkdown($path);
+            if ($markdown !== null) {
+                return $this->respondWithMarkdown($response, $markdown);
+            }
+            // Backend hasn't crawled this path yet (or md API failed) —
+            // fall through to HTML so the agent gets *something* this turn.
+        }
+
         // If the response body is already encoded (gzip / br / deflate) we
         // can't rewrite it without decoding first — str_contains / preg_replace
         // would corrupt the binary payload. Emit headers above for install
@@ -374,6 +390,128 @@ class InjectAeo
         $result = preg_replace('/<title\b[^>]*>.*?<\/title>/is', '', $html, 1);
 
         return $result ?? $html;
+    }
+
+    /**
+     * Quality-aware Accept-header check for `text/markdown`. Returns true
+     * only when the client *explicitly* asked for markdown AND its q-value
+     * is at least as high as text/html / *\/* (so a browser sending
+     * `Accept: text/html, *\/*;q=0.9` doesn't accidentally trigger md).
+     *
+     * Variants we want to match:
+     *   - text/markdown
+     *   - text/markdown, text/html
+     *   - text/markdown;q=0.9, text/html;q=0.8
+     * Variants we want to reject (HTML preferred):
+     *   - text/html, text/markdown            (first-listed at same q wins → HTML)
+     *   - text/html;q=0.9, text/markdown;q=0.8
+     *   - *\/*                                (browser default)
+     *   - (empty / missing Accept)
+     */
+    private function wantsMarkdown(Request $request): bool
+    {
+        $accept = (string) $request->header('Accept', '');
+        if ($accept === '' || stripos($accept, 'text/markdown') === false) {
+            return false;
+        }
+
+        $mdQ = 0.0;
+        $htmlQ = 0.0;
+        $mdIndex = PHP_INT_MAX;
+        $htmlIndex = PHP_INT_MAX;
+        $index = 0;
+
+        foreach (explode(',', $accept) as $part) {
+            $part = trim($part);
+            if ($part === '') {
+                continue;
+            }
+
+            $segments = explode(';', $part);
+            $mediaType = strtolower(trim($segments[0]));
+            $q = 1.0;
+
+            $segCount = count($segments);
+            for ($i = 1; $i < $segCount; $i++) {
+                $param = trim($segments[$i]);
+                if (stripos($param, 'q=') === 0) {
+                    $q = (float) substr($param, 2);
+                }
+            }
+
+            if ($mediaType === 'text/markdown') {
+                if ($q > $mdQ) {
+                    $mdQ = $q;
+                    $mdIndex = $index;
+                } elseif ($q === $mdQ && $index < $mdIndex) {
+                    $mdIndex = $index;
+                }
+            } elseif (
+                $mediaType === 'text/html'
+                || $mediaType === '*/*'
+                || $mediaType === 'text/*'
+            ) {
+                if ($q > $htmlQ) {
+                    $htmlQ = $q;
+                    $htmlIndex = $index;
+                } elseif ($q === $htmlQ && $index < $htmlIndex) {
+                    $htmlIndex = $index;
+                }
+            }
+
+            $index++;
+        }
+
+        if ($mdQ <= 0.0) {
+            return false;
+        }
+        if ($mdQ > $htmlQ) {
+            return true;
+        }
+        // Same q — break tie by listing order (RFC 7231 doesn't mandate this
+        // but it matches what most agent clients expect: list the format
+        // you actually want first).
+        return $mdQ === $htmlQ && $mdIndex < $htmlIndex;
+    }
+
+    /**
+     * Replace the response body with the markdown rendition. Adjusts the
+     * Content-Type, refreshes Content-Length, and adds `Accept` to Vary so
+     * shared caches don't serve markdown to a browser (or HTML to an agent).
+     */
+    private function respondWithMarkdown(Response $response, string $markdown): Response
+    {
+        $response->setContent($markdown);
+        $response->headers->set('Content-Type', 'text/markdown; charset=utf-8');
+        $response->headers->remove('Content-Encoding');
+
+        if ($response->headers->has('Content-Length')) {
+            $response->headers->set('Content-Length', (string) strlen($markdown));
+        }
+
+        $existingVary = (string) $response->headers->get('Vary', '');
+        $response->headers->set('Vary', $this->mergeVary($existingVary, 'Accept'));
+
+        return $response;
+    }
+
+    private function mergeVary(string $existing, string $value): string
+    {
+        if ($existing === '') {
+            return $value;
+        }
+
+        $tokens = array_map(
+            static fn (string $t): string => trim($t),
+            explode(',', $existing),
+        );
+        foreach ($tokens as $token) {
+            if (strcasecmp($token, $value) === 0) {
+                return $existing;
+            }
+        }
+
+        return $existing.', '.$value;
     }
 
     /**
