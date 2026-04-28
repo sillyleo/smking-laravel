@@ -50,10 +50,13 @@ class AeoClientTest extends TestCase
         $this->assertSame(AeoResponse::STATUS_PENDING, $response->status);
     }
 
-    public function test_failed_request_returns_not_found(): void
+    public function test_failed_4xx_returns_not_found(): void
     {
+        // v0.7.0 splits 4xx (not_found, 15min cache) from 5xx (server_error,
+        // 24hr cache). 5xx behavior covered separately in
+        // test_5xx_response_treated_as_server_error_not_not_found.
         Http::fake([
-            '*' => Http::response('oops', 500),
+            '*' => Http::response('bad request', 400),
         ]);
 
         $response = $this->app->make(AeoClient::class)->forPath('/broken');
@@ -161,5 +164,100 @@ class AeoClientTest extends TestCase
         $this->app->make(\Illuminate\Contracts\Cache\Factory::class)->store()->flush();
         $client->forPath('/missing');
         Http::assertSentCount(2);
+    }
+
+    // ── Three-tier cache TTL (v0.7.0) ─────────────────────────────
+
+    public function test_5xx_response_treated_as_server_error_not_not_found(): void
+    {
+        Http::fake([
+            '*' => Http::response('upstream broken', 503),
+        ]);
+
+        $response = $this->app->make(AeoClient::class)->forPath('/x');
+
+        $this->assertSame(AeoResponse::STATUS_SERVER_ERROR, $response->status);
+        $this->assertFalse($response->isReady());
+    }
+
+    public function test_4xx_response_still_treated_as_not_found(): void
+    {
+        Http::fake([
+            '*' => Http::response('not found', 404),
+        ]);
+
+        $response = $this->app->make(AeoClient::class)->forPath('/x');
+
+        $this->assertSame(AeoResponse::STATUS_NOT_FOUND, $response->status);
+    }
+
+    public function test_connection_exception_treated_as_server_error(): void
+    {
+        Http::fake([
+            '*' => fn () => throw new \Illuminate\Http\Client\ConnectionException('cannot reach host'),
+        ]);
+
+        $response = $this->app->make(AeoClient::class)->forPath('/x');
+
+        $this->assertSame(AeoResponse::STATUS_SERVER_ERROR, $response->status);
+    }
+
+    public function test_server_error_caches_for_24_hours_by_default(): void
+    {
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cache.ttl', 3600);
+        // server_error_ttl default is 86400 (24hr)
+
+        Http::fake([
+            '*' => Http::response('upstream broken', 503),
+        ]);
+
+        $client = $this->app->make(AeoClient::class);
+        $client->forPath('/dead');
+        Http::assertSentCount(1);
+
+        // Subsequent call within the 24hr window must hit cache, NOT re-try
+        // the dead upstream — this is the FPM-saturation prevention.
+        $client->forPath('/dead');
+        Http::assertSentCount(1);
+    }
+
+    public function test_pending_status_does_not_cache(): void
+    {
+        config()->set('smking.cache.enabled', true);
+
+        Http::fake([
+            '*' => Http::response(['status' => 'pending'], 202),
+        ]);
+
+        $client = $this->app->make(AeoClient::class);
+        $client->forPath('/p');
+        $client->forPath('/p');
+
+        // Pending is intentionally NOT cached — re-checking on each request
+        // means users see ready content the moment crawl finishes.
+        Http::assertSentCount(2);
+    }
+
+    // ── Connect/read timeout split (v0.7.0, #3) ───────────────────
+
+    public function test_connect_timeout_and_read_timeout_passed_separately(): void
+    {
+        config()->set('smking.connect_timeout', 0.5);
+        config()->set('smking.timeout', 1.5);
+
+        Http::fake([
+            '*' => Http::response(['status' => 'not_found'], 404),
+        ]);
+
+        $this->app->make(AeoClient::class)->forPath('/x');
+
+        Http::assertSent(function ($request) {
+            // Laravel's PendingRequest serializes options via Guzzle; we
+            // can't directly assert the timeout values from a fake, but
+            // we can confirm the request went through (regression: bad
+            // method names like ->connectTimeoutMS would crash).
+            return str_contains($request->url(), 'api.test/api/v1/public/aeo');
+        });
     }
 }

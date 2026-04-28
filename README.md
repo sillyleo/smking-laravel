@@ -116,6 +116,57 @@ The `<x-smking-meta />` component mirrors `getSmkingMetadata()` from `@smking/ne
 8. **Agent discovery** (v0.5.0+): every HTML response advertises the markdown alternate via `Link: <{url}>; rel="alternate"; type="text/markdown"` (RFC 8288). Appended to any existing Link headers; idempotent if you already wired your own.
 9. **Visually-hidden body fragments by default** (v0.6.0+): auto-injected `summaryHtml` / `faqHtml` are wrapped in an inline-style sr-only `<div>` so they don't pollute SPA layouts where `</body>` injection lands outside `#app`. Microdata stays in the DOM (Googlebot reads it); JSON-LD in `<head>` is the primary AEO signal. Switch with `SMKING_INJECT_VISIBILITY=visible` if you want the v0.5.x behavior. The `<x-smking-aeo />` Blade component is unaffected — explicit placement is always rendered as you wrote it.
 
+## Outage Runbook
+
+When the smking SaaS is down or unreachable, the SDK fails open — your pages still render normally, just without smking-injected content. Three knobs you may want to know about:
+
+### 1. Cache absorbs most outages automatically (v0.7.0+)
+
+Three-tier cache TTL since v0.7.0:
+
+| Status | TTL | Behavior |
+|---|---|---|
+| `ready` | 1 hour | Customer's cached AEO content keeps serving |
+| `not_found` (4xx) | 15 min | Backend audit catching up; recheck soon |
+| `server_error` (5xx, DNS, TCP, timeout) | **24 hours** | Don't hammer dead upstream |
+
+A million-PV-per-day site running Laravel can saturate its PHP-FPM pool when a hung upstream holds workers. The 24hr `server_error` cache means each path is retried at most once per day — outage is invisible to your traffic after the first wave fails over.
+
+### 2. Tighten timeouts further if you're at scale
+
+Default since v0.7.0: `connect_timeout=1s`, `timeout=1.5s`. For million-PV sites where every millisecond counts:
+
+```dotenv
+SMKING_CONNECT_TIMEOUT=0.5
+SMKING_HTTP_TIMEOUT=1
+```
+
+### 3. Kill switch when SaaS is in trouble
+
+Set in `.env` and clear config cache:
+
+```dotenv
+SMKING_AUTO_INJECT=false
+```
+
+Middleware still emits `X-Smking-Status` headers (so `curl -I` install verification works) but doesn't try to fetch any content. Reverts to original page entirely.
+
+### 4. Recovering after SaaS comes back
+
+Per-path:
+
+```bash
+php artisan smking:cache:purge /products/widget
+```
+
+This forgets both `smking:aeo:*` and `smking:md:*` cache for that path so the next request re-fetches.
+
+For wholesale recovery (clears the whole app cache):
+
+```bash
+php artisan cache:clear
+```
+
 ## Upgrading
 
 This package is in `v0.x`. Per Composer's caret convention for pre-1.0 packages, **every minor bump (0.5 → 0.6, 0.6 → 0.7) is treated as breaking** — the constraint `"smking/laravel": "^0.6"` resolves to `>=0.6.0 <0.7.0` and `composer update` won't cross into 0.7.

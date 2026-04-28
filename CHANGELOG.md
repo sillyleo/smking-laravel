@@ -1,5 +1,108 @@
 # Changelog
 
+## v0.7.0
+
+**Major outage hardening + behavior changes**. Customers must bump composer constraint `^0.6` → `^0.7`.
+
+### feat(outage): three-tier cache TTL — million-PV protection
+
+`AeoClient` now distinguishes three negative-cache outcomes:
+
+| Status | TTL | When |
+|---|---|---|
+| `ready` | full ttl (default 1hr, unchanged) | Successful response with content |
+| `not_found` | **15 min** (was 30s) | 4xx — SaaS rejected the request (bad key, unaudited path) |
+| `server_error` (new) | **24 hr** | 5xx, DNS failure, TCP refused, read timeout — SaaS unreachable |
+
+The 24hr `server_error` TTL is the headline change: a hung upstream on a million-PV-per-day site can saturate the PHP-FPM worker pool in seconds when every cache miss holds a worker for `timeout` seconds. Caching the failure for 24 hours means each path retries at most once per day — outage becomes invisible to traffic after the first wave fails over.
+
+Customer recovery: `php artisan smking:cache:purge <path>` forgets the cached failure. See **Outage Runbook** in README.
+
+`AeoResponse::STATUS_SERVER_ERROR` + `AeoResponse::serverError()` factory added. `isReady()` returns `false` for both `not_found` and `server_error` (middleware behavior unchanged — both result in zero injection).
+
+### feat(timeout): connect/read split — `connect_timeout` 1s, `timeout` 1.5s
+
+Single `timeout=3s` was too generous for high-traffic sites:
+
+- 50-worker PHP-FPM pool × 3s timeout → saturation point ~17 RPS
+- 50-worker × (1s connect + 1.5s read) → saturation point ~20 RPS
+
+Split exposed via two config keys + env vars:
+
+```dotenv
+SMKING_CONNECT_TIMEOUT=1.0
+SMKING_HTTP_TIMEOUT=1.5
+```
+
+Million-PV sites can drop further (`SMKING_HTTP_TIMEOUT=1`, `SMKING_CONNECT_TIMEOUT=0.5`). Combined with the 24hr `server_error` cache, a single timeout barely matters — first request fails fast, then 24hr cache absorbs everything.
+
+### feat(except): expand defaults for e-commerce + auth — `Defaults::EXCEPT_PATTERNS`
+
+New `Defaults::EXCEPT_PATTERNS` const exposes the package's recommended baseline as a public surface so customers who published config under v0.6 can pull in v0.7's expanded patterns by spreading the const without re-publishing:
+
+```php
+// config/smking.php
+'except' => [
+    ...\Smking\Laravel\Defaults::EXCEPT_PATTERNS,
+    'my/custom/path',
+],
+```
+
+New patterns added in v0.7.0 (legacy patterns still included):
+
+- `cart`, `cart/*`, `checkout`, `checkout/*` — session-state pages
+- `account/*`, `profile/*` — credentialed dashboards
+- `login`, `logout`, `register` — auth flows
+- `password/*`, `forgot-password*`, `reset-password*` — credential management
+
+These pages either depend on session state (cart contents) or carry no SEO-relevant content (login forms). Sending them upstream wasted audit budget and leaked per-user paths into the queue.
+
+### feat: `php artisan smking:cache:purge <path>`
+
+Per-path cache invalidation for both AEO and markdown surfaces. Supports the outage-recovery + content-refresh workflows described in README. Bulk purge requires driver-level key enumeration (not exposed by the Cache facade) — for full reset, `php artisan cache:clear`.
+
+`AeoClient` exposes `cacheNamespace()` + `cacheKeyPrefixes()` + `cacheStore()` as `@internal` API for the command to reconstruct keys without reaching into private state.
+
+### docs: README "Outage Runbook"
+
+New section walks through the three-tier cache, timeout knobs, `SMKING_AUTO_INJECT=false` kill switch, and `cache:purge` recovery path. Read this before you go to prod.
+
+### Tests added (15 new)
+
+- `test_5xx_response_treated_as_server_error_not_not_found`
+- `test_4xx_response_still_treated_as_not_found`
+- `test_connection_exception_treated_as_server_error`
+- `test_server_error_caches_for_24_hours_by_default`
+- `test_pending_status_does_not_cache`
+- `test_connect_timeout_and_read_timeout_passed_separately`
+- `test_default_except_includes_ecommerce_and_auth_routes`
+- `test_default_except_still_covers_legacy_categories`
+- `test_config_uses_defaults_const`
+- `test_purge_removes_aeo_and_markdown_keys_for_path`
+- `test_purge_only_clears_current_namespace_after_key_rotation`
+- (+ regression rename `test_failed_request_returns_not_found` → `test_failed_4xx_returns_not_found`)
+
+91 tests total (was 80).
+
+### Internal
+
+- `AeoClient::connectTimeout()`, `AeoClient::readTimeout()` — new private helpers
+- `AeoClient::cacheNamespace()`, `AeoClient::cacheKeyPrefixes()`, `AeoClient::cacheStore()` — new `@internal` public methods (for the cache-purge command)
+- `AeoClient::$lastMarkdownStatus` — request-scoped sidechannel so `rememberMarkdown` knows whether `fetchMarkdown` returned null due to not_found or server_error
+- `Smking\Laravel\Defaults` — new public const class
+- `Smking\Laravel\Console\CachePurgeCommand` — new artisan command
+
+### Migration
+
+Customers must bump composer constraint:
+
+```bash
+# composer.json
+"smking/laravel": "^0.7"
+```
+
+Then `composer update smking/laravel`. If you customized `except[]` in your published `config/smking.php`, run `php artisan smking:doctor` (the v0.6.3 schema-drift check shows you what to merge in). Or re-publish with `--force` to start from the new baseline.
+
 ## v0.6.3
 
 **Patch**: docs + diagnostics. No behavior changes.

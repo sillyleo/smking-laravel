@@ -19,6 +19,7 @@ final class AeoResponse
     public const STATUS_READY = 'ready';
     public const STATUS_PENDING = 'pending';
     public const STATUS_NOT_FOUND = 'not_found';
+    public const STATUS_SERVER_ERROR = 'server_error';
 
     /**
      * @param  array<string, mixed>|null  $jsonLd
@@ -89,6 +90,17 @@ final class AeoResponse
     public static function pending(): self
     {
         return new self(status: self::STATUS_PENDING);
+    }
+
+    /**
+     * SaaS unreachable (DNS / TCP / timeout / 5xx) — middleware behaves
+     * identically to not_found (no injection) but cache TTL is much longer
+     * (default 24hr) so a million-PV site doesn't keep retrying a dead
+     * upstream. Customer recovery via `php artisan smking:cache:purge`.
+     */
+    public static function serverError(): self
+    {
+        return new self(status: self::STATUS_SERVER_ERROR);
     }
 
     public function isReady(): bool

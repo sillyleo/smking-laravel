@@ -9,6 +9,7 @@ use Illuminate\Foundation\Http\Kernel as FoundationKernel;
 use Illuminate\Support\ServiceProvider;
 use ReflectionClass;
 use ReflectionException;
+use Smking\Laravel\Console\CachePurgeCommand;
 use Smking\Laravel\Console\DoctorCommand;
 use Smking\Laravel\Http\Middleware\InjectAeo;
 use Smking\Laravel\View\Components\Aeo as AeoComponent;
@@ -54,7 +55,10 @@ class SmkingServiceProvider extends ServiceProvider
         $this->registerMiddleware();
 
         if ($this->app->runningInConsole()) {
-            $this->commands([DoctorCommand::class]);
+            $this->commands([
+                DoctorCommand::class,
+                CachePurgeCommand::class,
+            ]);
         }
     }
 
