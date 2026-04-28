@@ -1,5 +1,65 @@
 # Changelog
 
+## v0.7.0 — pre-release adversarial review fixes (round 3)
+
+Third adversarial review caught the missing pieces between per-path protection and namespace-wide protection. All folded into v0.7.0 before tagging.
+
+### [high] Namespace-wide circuit breaker — protects against high-cardinality outages
+
+Per-path 24hr `server_error` cache only protects keys we've already failed. A high-cardinality outage (catalog spray, full-site crawler, sitemap fetch when SaaS is down) would still consume one full timeout per distinct URL — the second URL in the burst doesn't know the first one just failed.
+
+v0.7.0 round-3 adds a namespace-wide circuit breaker keyed by `(api_key, base_url)`:
+
+- Any path's first 5xx / transport failure trips a `smking:circuit:*` cache flag (default 60s TTL).
+- While the flag is present, ALL `forPath()` / `getMarkdown()` calls short-circuit with `server_error` WITHOUT touching the upstream.
+- Auto half-open: when the flag expires, the next request hits upstream — success keeps the breaker closed; another failure trips it again.
+
+Two new env knobs (default sensible):
+
+```dotenv
+SMKING_CIRCUIT_BREAKER=true       # set false to disable
+SMKING_CIRCUIT_BREAKER_TTL=60     # seconds
+```
+
+Combined with per-path `server_error` cache and single-flight: under a million-PV outage scenario, **only the first request to any path** in a 60-second window touches the upstream. Per-path cache then protects already-failed paths for 24 hours.
+
+### [high] Cache `pending` status (default 15s) — kills hot-URL polling
+
+`pending` (202 from SaaS, backlog still crawling) was previously not cached at all — single-flight only suppressed concurrent overlap, but as soon as one request returned `pending` the next request immediately tried upstream. A newly launched URL with even modest traffic could generate hundreds of redundant calls per minute against the crawler queue.
+
+v0.7.0 round-3 adds `cache.pending_ttl` (default 15s, configurable via `SMKING_PENDING_TTL`). Pending now joins the four-tier TTL match alongside ready / not_found / server_error.
+
+### [medium] `cache:purge --product-id=N` — recovery for WC product surface
+
+`forProductId()` (used by `Smking::forProductId()` facade and the legacy WC flow) caches under `product_id=N` keys, completely separate from `path=...` keys. Pre-round-3 the only way to invalidate those entries was `php artisan cache:clear` — too large a blast radius.
+
+```bash
+# Path-based recovery (existing)
+php artisan smking:cache:purge /products/widget
+
+# Product-id recovery (new in round-3)
+php artisan smking:cache:purge --product-id=42
+```
+
+Mutually exclusive with `<path>` argument; rejects zero / non-positive IDs.
+
+### Tests added (5 new in this round, 1 obsolete removed)
+
+- `test_circuit_breaker_trips_after_server_error_and_short_circuits_other_paths` — proves cross-path namespace protection
+- `test_circuit_breaker_can_be_disabled` — opt-out works
+- `test_pending_response_caches_for_short_window` — pending now hits cache on second call
+- `test_purge_by_product_id_clears_correct_cache_key`
+- `test_purge_rejects_both_path_and_product_id`
+- `test_purge_rejects_zero_product_id`
+- (removed obsolete `test_pending_status_does_not_cache` — behavior reversed)
+
+114 tests total (was 109).
+
+### Internal
+
+- `AeoClient::circuitOpen()` / `tripCircuit()` / `circuitKey()` — three new private helpers
+- `CachePurgeCommand::purgeByPath()` / `purgeByProductId()` — split handler
+
 ## v0.7.0 — pre-release adversarial review fixes (round 2)
 
 A second adversarial review (codex) caught three real defects in the round-1 fixes. Folded into v0.7.0 before tagging.

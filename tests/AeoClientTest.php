@@ -222,22 +222,8 @@ class AeoClientTest extends TestCase
         Http::assertSentCount(1);
     }
 
-    public function test_pending_status_does_not_cache(): void
-    {
-        config()->set('smking.cache.enabled', true);
-
-        Http::fake([
-            '*' => Http::response(['status' => 'pending'], 202),
-        ]);
-
-        $client = $this->app->make(AeoClient::class);
-        $client->forPath('/p');
-        $client->forPath('/p');
-
-        // Pending is intentionally NOT cached — re-checking on each request
-        // means users see ready content the moment crawl finishes.
-        Http::assertSentCount(2);
-    }
+    // (test_pending_status_does_not_cache removed in round-3 — pending
+    // now caches for pending_ttl, see test_pending_response_caches_for_short_window)
 
     // ── Single-flight (v0.7.0 codex review fix) ──────────────────
 
@@ -382,6 +368,71 @@ class AeoClientTest extends TestCase
         $this->assertNull($second);
         // No way to assert TTL directly, but the contract is: each call
         // computes its own status, no state from prior calls.
+    }
+
+    // ── Round-3: circuit breaker + pending cache ─────────────────
+
+    public function test_circuit_breaker_trips_after_server_error_and_short_circuits_other_paths(): void
+    {
+        // The whole point of v0.7.0 round-3: per-path 24hr cache only
+        // protects keys we've already failed. A high-cardinality outage
+        // (catalog spray / crawler) would still consume one timeout per
+        // distinct URL. Circuit breaker shorts the WHOLE namespace once
+        // any path hits a 5xx / transport error.
+        config()->set('smking.cache.enabled', true);
+
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response('upstream broken', 503),
+        ]);
+
+        $client = $this->app->make(AeoClient::class);
+
+        // Path A — first to fail, trips the circuit
+        $a = $client->forPath('/product-a');
+        $this->assertSame(\Smking\Laravel\Data\AeoResponse::STATUS_SERVER_ERROR, $a->status);
+        Http::assertSentCount(1);
+
+        // Path B (different URL, never called before) — circuit tripped,
+        // must short-circuit WITHOUT a network call
+        $b = $client->forPath('/product-b');
+        $this->assertSame(\Smking\Laravel\Data\AeoResponse::STATUS_SERVER_ERROR, $b->status);
+        Http::assertSentCount(1); // STILL one — second call never went out
+    }
+
+    public function test_circuit_breaker_can_be_disabled(): void
+    {
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cache.circuit_breaker', false);
+
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response('upstream broken', 503),
+        ]);
+
+        $client = $this->app->make(AeoClient::class);
+        $client->forPath('/a');
+        $client->forPath('/b');
+
+        // Circuit disabled — both paths should send their own request
+        Http::assertSentCount(2);
+    }
+
+    public function test_pending_response_caches_for_short_window(): void
+    {
+        // Round-3: pending was previously NOT cached, letting hot URLs
+        // poll upstream continuously while crawl backlog cleared.
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cache.pending_ttl', 30);
+
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response(['status' => 'pending'], 202),
+        ]);
+
+        $client = $this->app->make(AeoClient::class);
+        $client->forPath('/launching');
+        $client->forPath('/launching'); // within pending_ttl window
+
+        // Same URL within pending_ttl → cache hit, no second upstream call
+        Http::assertSentCount(1);
     }
 
     // ── Connect/read timeout split (v0.7.0, #3) ───────────────────

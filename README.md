@@ -161,9 +161,13 @@ Compare AEO score / search ranking / AI-citation share across the three pages ov
 
 When the smking SaaS is down or unreachable, the SDK fails open — your pages still render normally, just without smking-injected content. Three knobs you may want to know about:
 
-### 0. Single-flight cache lock prevents thundering herd (v0.7.0+)
+### 0. Layered protection — single-flight + circuit breaker (v0.7.0+)
 
-When a path is uncached and traffic spikes, only ONE PHP-FPM worker calls smking upstream — others fail open immediately (return un-injected page) instead of all blocking on the same upstream call. Prevents the worker pool from saturating during cold-start or right after cache expiry. Uses `Cache::lock()`; works with redis / memcached / database drivers (recommended for production), graceful fallback for drivers without lock support.
+Two complementary defenses run on every cache miss:
+
+**Single-flight cache lock** — When a path is uncached and traffic spikes, only ONE PHP-FPM worker calls smking upstream; others fail open immediately (return un-injected page). Per-path protection. Uses `Cache::lock()` (redis / memcached / database / array drivers; graceful fallback for stores without lock support).
+
+**Namespace-wide circuit breaker** — Once any path hits a 5xx / transport error, a flag is set for `circuit_breaker_ttl` seconds (default 60). While the flag is present, ALL paths short-circuit without touching the upstream. Protects against high-cardinality outage events (catalog spray, full-site crawler) where per-path cache wouldn't help — the second URL in the burst doesn't know the first one just failed. Auto half-open: when the flag expires the next request hits upstream; success closes the breaker, another failure trips it again. Disable with `SMKING_CIRCUIT_BREAKER=false` if your customer cache layer can't store namespace flags reliably.
 
 ### 1. Cache absorbs most outages automatically (v0.7.0+)
 

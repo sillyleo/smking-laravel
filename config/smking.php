@@ -193,8 +193,26 @@ return [
         // v0.7.0 (new): 24hr default. Customer recovery: `cache:purge`.
         'server_error_ttl' => env('SMKING_SERVER_ERROR_TTL', 86400),
 
+        // Pending (202 from SaaS — backlog still crawling). v0.7.0 round-3:
+        // cache for short window so a hot-launch URL doesn't hammer the
+        // crawler queue every request. After this TTL the next request
+        // checks again — by then the crawl usually completed (ready).
+        'pending_ttl' => env('SMKING_PENDING_TTL', 15),
+
+        // Namespace-wide circuit breaker. v0.7.0 round-3: when ANY path
+        // hits a 5xx / transport error, set a flag for circuit_breaker_ttl
+        // seconds. While the flag is present, all forPath() / getMarkdown()
+        // calls short-circuit with server_error WITHOUT touching the
+        // upstream. Critical for outage protection on high-cardinality
+        // sites — per-path 24hr cache only protects keys we've seen fail.
+        // Auto half-open: when the flag expires, the next request hits
+        // upstream; success keeps it closed, failure trips again.
+        'circuit_breaker' => env('SMKING_CIRCUIT_BREAKER', true),
+        'circuit_breaker_ttl' => env('SMKING_CIRCUIT_BREAKER_TTL', 60),
+
         'prefix' => 'smking:aeo:',
         'markdown_prefix' => 'smking:md:',
+        'circuit_prefix' => 'smking:circuit:',
     ],
 
     /*

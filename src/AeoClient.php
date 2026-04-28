@@ -151,6 +151,12 @@ class AeoClient
             return null;
         }
 
+        // Shared circuit breaker — if forPath() tripped it, getMarkdown()
+        // also short-circuits without an upstream call.
+        if ($this->circuitOpen($repository)) {
+            return null;
+        }
+
         // v0.7.0 single-flight protection — same logic as forPath()'s
         // singleFlight(), adapted for the markdown surface (cached value
         // is string|false rather than AeoResponse).
@@ -178,6 +184,12 @@ class AeoClient
                     ? (int) ($cacheConfig['server_error_ttl'] ?? 86400)
                     : min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900));
                 $repository->put($cacheKey, false, $writeTtl);
+
+                // Shared circuit — markdown 5xx / transport failure also
+                // trips the namespace-wide breaker for forPath().
+                if ($result['status'] === AeoResponse::STATUS_SERVER_ERROR) {
+                    $this->tripCircuit($repository);
+                }
 
                 return;
             }
@@ -356,31 +368,92 @@ class AeoClient
             return $cached;
         }
 
+        // v0.7.0 round-3: namespace-wide circuit breaker. Per-path 24hr
+        // server_error cache only protects keys we've already failed; a
+        // cold-key burst across N distinct URLs (catalog spray, crawler,
+        // sitemap fetch) would still each consume a full timeout before
+        // their own server_error entry lands. The circuit breaker shorts
+        // the WHOLE namespace for a configurable window after any failure,
+        // so the second URL in the burst skips the upstream call entirely.
+        if ($this->circuitOpen($repository)) {
+            return AeoResponse::serverError();
+        }
+
         // v0.7.0 single-flight protection: under concurrent traffic to a
         // cold key, all workers would otherwise call upstream simultaneously
         // (cache stampede / thundering herd). One worker takes a short lock
         // and does the upstream fetch + cache write; others fail open so
         // worker pool stays healthy.
         return $this->singleFlight($repository, $cacheKey, $resolver, function (AeoResponse $response) use ($repository, $cacheKey, $cacheConfig, $ttl): void {
-            // Don't cache pending — recheck on next request.
-            if ($response->status === AeoResponse::STATUS_PENDING) {
-                return;
-            }
-
-            // v0.7.0 three-tier TTL:
+            // v0.7.0 round-3 four-tier TTL:
             //   ready        → full ttl (default 1hr)
-            //   not_found    → not_found_ttl (default 15min, was 30s)
+            //   not_found    → not_found_ttl (default 15min)
             //   server_error → server_error_ttl (default 24hr) — kills retry
-            //                  loop against a dead upstream so million-PV
-            //                  sites don't saturate FPM workers
+            //                  loop against a dead upstream
+            //   pending      → pending_ttl (default 15s) — was "never cache"
+            //                  but a hot URL launched mid-crawl would
+            //                  otherwise poll upstream continuously until
+            //                  ready
             $writeTtl = match ($response->status) {
                 AeoResponse::STATUS_READY => $ttl,
                 AeoResponse::STATUS_NOT_FOUND => min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900)),
                 AeoResponse::STATUS_SERVER_ERROR => (int) ($cacheConfig['server_error_ttl'] ?? 86400),
+                AeoResponse::STATUS_PENDING => (int) ($cacheConfig['pending_ttl'] ?? 15),
                 default => $ttl,
             };
             $repository->put($cacheKey, $response, $writeTtl);
+
+            // Trip the circuit on transport / 5xx failures so the next
+            // distinct URL in this same outage window short-circuits.
+            if ($response->status === AeoResponse::STATUS_SERVER_ERROR) {
+                $this->tripCircuit($repository);
+            }
         });
+    }
+
+    /**
+     * Namespace-wide circuit breaker (v0.7.0 round-3). Tripped by writing
+     * a short-lived flag in the cache; checked at the start of each
+     * forPath() / getMarkdown() call. While the flag is present the SDK
+     * skips the upstream entirely, no matter which path is being requested.
+     *
+     * Auto half-open: the flag has TTL = `circuit_breaker_ttl` (default
+     * 60s). When it expires, the next request hits upstream — if that
+     * succeeds, the breaker stays closed. If it fails again, the breaker
+     * trips for another 60s.
+     *
+     * Same `(api_key, base_url)` namespace as the rest of the cache, so
+     * rotating either auto-clears the breaker.
+     */
+    private function circuitKey(): string
+    {
+        $cacheConfig = $this->config->get('smking.cache', []);
+
+        return ($cacheConfig['circuit_prefix'] ?? 'smking:circuit:').$this->cacheNamespace();
+    }
+
+    private function circuitOpen(\Illuminate\Contracts\Cache\Repository $repository): bool
+    {
+        $cacheConfig = $this->config->get('smking.cache', []);
+        if (! ($cacheConfig['circuit_breaker'] ?? true)) {
+            return false;
+        }
+
+        return $repository->has($this->circuitKey());
+    }
+
+    private function tripCircuit(\Illuminate\Contracts\Cache\Repository $repository): void
+    {
+        $cacheConfig = $this->config->get('smking.cache', []);
+        if (! ($cacheConfig['circuit_breaker'] ?? true)) {
+            return;
+        }
+
+        $repository->put(
+            $this->circuitKey(),
+            true,
+            (int) ($cacheConfig['circuit_breaker_ttl'] ?? 60),
+        );
     }
 
     /**

@@ -76,6 +76,46 @@ class CachePurgeCommandTest extends TestCase
         $this->assertFalse($store->has($aeoKey), 'canonical-path entry MUST be purged when input has trailing slash');
     }
 
+    public function test_purge_by_product_id_clears_correct_cache_key(): void
+    {
+        // Round-3: forProductId() uses a different cache key than path-based
+        // forPath() — pre-fix the only recovery for product_id caches was
+        // `cache:clear` (whole-app blast radius). New --product-id option
+        // targets just the product entry.
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response(['status' => 'ready'], 200),
+        ]);
+
+        $client = $this->app->make(AeoClient::class);
+        $client->forProductId(42);
+
+        $store = $this->app->make(CacheRepository::class);
+        $prefixes = $client->cacheKeyPrefixes();
+        $aeoKey = $prefixes['aeo'].http_build_query(['product_id' => 42]);
+
+        $this->assertTrue($store->has($aeoKey), 'product_id cache must be primed');
+
+        $this->artisan('smking:cache:purge', ['--product-id' => 42])
+            ->assertExitCode(0);
+
+        $this->assertFalse($store->has($aeoKey), 'product_id cache must be purged');
+    }
+
+    public function test_purge_rejects_both_path_and_product_id(): void
+    {
+        $this->artisan('smking:cache:purge', [
+            'path' => '/x',
+            '--product-id' => 99,
+        ])
+            ->assertExitCode(2); // INVALID
+    }
+
+    public function test_purge_rejects_zero_product_id(): void
+    {
+        $this->artisan('smking:cache:purge', ['--product-id' => 0])
+            ->assertExitCode(2);
+    }
+
     public function test_purge_only_clears_current_namespace_after_key_rotation(): void
     {
         // Prime cache with one api_key
