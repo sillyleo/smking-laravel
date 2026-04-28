@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.5.0
+
+**New feature**: `Link: rel="alternate"; type="text/markdown"` response header — agent discovery for the v0.4.0 markdown rendition.
+
+### Why
+
+v0.4.0 made the middleware serve markdown when an agent sends `Accept: text/markdown`, but discovery was passive: the agent had to *speculatively* try a markdown Accept header to find out. RFC 8288 Link headers are the standard way to advertise an alternate representation, and Cloudflare's `isitagentready.com` page-level audit explicitly checks for this — sites that emit it score higher on Agent Readiness without any extra work.
+
+### Behavior
+
+Every HTML 200 GET response from the middleware now carries:
+
+```
+Link: <{request-url}>; rel="alternate"; type="text/markdown"
+```
+
+Notes:
+
+- Appended (not replaced) so customers' existing Link headers (`rel="next"` / `rel="prev"` / pagination headers / canonical headers) survive untouched.
+- Skipped on markdown responses themselves — pointing an already-markdown body at a markdown alternate of itself is meaningless. (The respondWithMarkdown branch returns before the Link emission line.)
+- Skipped when `inject.markdown=false` — the same opt-out flag that disables Accept: text/markdown serving also turns off Link header advertising. Consistent semantics: if SDK isn't serving markdown, it shouldn't advertise it.
+- Idempotent — if a customer (or a previous middleware run) already advertises a markdown alternate, we don't add another. Detection matches the audit-side regex (`/rel="?alternate"?/i` && `/type="?text\/markdown"?/i`).
+
+### Audit score interaction
+
+`auditUrl` already reads this Link header via `hasMarkdownAlternate` (5 points) and verifies content negotiation actually serves markdown via `servesMarkdown` (5 points). v0.5.0 makes both auto-`true` for SDK-installed sites — combined +10 points on the page-level Agent Readiness signals, install-only.
+
+### Tests added
+
+- `test_emits_markdown_alternate_link_header_on_html_response` — basic emit
+- `test_link_header_appends_to_customer_existing_link` — customer's `rel="next"` survives
+- `test_link_header_skipped_when_inject_markdown_false` — opt-out
+- `test_link_header_not_duplicated_when_customer_already_advertises_markdown` — idempotency
+- `test_link_header_not_emitted_on_markdown_response` — meaningless on md body
+
+64 tests total (was 59).
+
+### Internal
+
+- `InjectAeo::addMarkdownAlternateLink()` — new private helper.
+
 ## v0.4.0
 
 **New feature**: Markdown for Agents — content negotiation for autonomous agent clients.

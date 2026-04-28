@@ -824,4 +824,140 @@ class InjectAeoMiddlewareTest extends TestCase
         $this->assertStringContainsString('Markdown wins', (string) $response->getContent());
         $this->assertStringContainsString('text/markdown', (string) $response->headers->get('Content-Type'));
     }
+
+    // ── Markdown alternate Link header (v0.5.0) ───────────────────
+
+    public function test_emits_markdown_alternate_link_header_on_html_response(): void
+    {
+        Http::fake([
+            '*api/v1/public/aeo*' => Http::response(['status' => 'ready'], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('https://shop.example/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $link = (string) $response->headers->get('Link');
+
+        $this->assertStringContainsString('rel="alternate"', $link);
+        $this->assertStringContainsString('type="text/markdown"', $link);
+        $this->assertStringContainsString('https://shop.example/products/widget', $link);
+    }
+
+    public function test_link_header_appends_to_customer_existing_link(): void
+    {
+        Http::fake([
+            '*api/v1/public/aeo*' => Http::response(['status' => 'ready'], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('https://shop.example/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            $r = new Response(
+                '<html><head></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+            $r->headers->set('Link', '<https://shop.example/products/next>; rel="next"');
+
+            return $r;
+        });
+
+        $allLink = $response->headers->all('Link');
+
+        // Customer's rel="next" must survive untouched, smking's alternate appended
+        $combined = implode(' || ', $allLink);
+        $this->assertStringContainsString('rel="next"', $combined);
+        $this->assertStringContainsString('rel="alternate"', $combined);
+        $this->assertStringContainsString('text/markdown', $combined);
+    }
+
+    public function test_link_header_skipped_when_inject_markdown_false(): void
+    {
+        config()->set('smking.inject.markdown', false);
+
+        Http::fake([
+            '*api/v1/public/aeo*' => Http::response(['status' => 'ready'], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('https://shop.example/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $link = (string) $response->headers->get('Link', '');
+
+        $this->assertStringNotContainsString('text/markdown', $link);
+    }
+
+    public function test_link_header_not_duplicated_when_customer_already_advertises_markdown(): void
+    {
+        Http::fake([
+            '*api/v1/public/aeo*' => Http::response(['status' => 'ready'], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('https://shop.example/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            $r = new Response(
+                '<html><head></head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+            // Customer already wired their own markdown alternate.
+            $r->headers->set('Link', '<https://shop.example/products/widget.md>; rel="alternate"; type="text/markdown"');
+
+            return $r;
+        });
+
+        $allLink = $response->headers->all('Link');
+        $count = 0;
+        foreach ($allLink as $h) {
+            if (stripos($h, 'rel="alternate"') !== false && stripos($h, 'text/markdown') !== false) {
+                $count++;
+            }
+        }
+
+        $this->assertSame(1, $count, 'Should not duplicate markdown alternate when customer already advertises one');
+    }
+
+    public function test_link_header_not_emitted_on_markdown_response(): void
+    {
+        Http::fake([
+            '*api/v1/public/aeo*' => Http::response(['status' => 'ready'], 200),
+            '*api/v1/public/md*' => Http::response("# OK\n", 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('https://shop.example/products/widget', 'GET', server: [
+            'HTTP_ACCEPT' => 'text/markdown',
+        ]);
+        $response = $middleware->handle($request, function () {
+            return new Response('<html><head></head><body>x</body></html>', 200, ['Content-Type' => 'text/html']);
+        });
+
+        // The response body is already markdown — pointing the agent to a
+        // markdown alternate of itself is meaningless. respondWithMarkdown
+        // returns before the Link emission line.
+        $link = (string) $response->headers->get('Link', '');
+
+        $this->assertSame('', $link);
+        $this->assertStringContainsString('text/markdown', (string) $response->headers->get('Content-Type'));
+    }
 }
