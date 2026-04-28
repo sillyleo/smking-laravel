@@ -1,5 +1,58 @@
 # Changelog
 
+## v0.7.0 — pre-release adversarial review fixes (round 4)
+
+Fourth adversarial review (codex, requested against the explicit recommendation to stop at round 3) caught three real issues that the round-3 cuts didn't cover: cross-surface coupling, recovery-flow false advertising, and a first-launch regression on the new miss TTL default. All folded into v0.7.0 before tagging.
+
+### [high] Per-surface circuit breaker — markdown failure no longer suppresses HTML AEO
+
+The round-3 breaker was a single `smking:circuit:{ns}` flag shared by `forPath()` (HTML AEO injection, every page render) and `getMarkdown()` (agent-only optional surface for `Accept: text/markdown` clients). A markdown 5xx would short-circuit HTML injection for the full breaker TTL — wrong trust boundary: an outage on an optional agent endpoint should not affect the customer-facing HTML path.
+
+Round-4 splits the breaker key per upstream surface:
+
+- HTML AEO uses `smking:circuit:aeo:{ns}`
+- Markdown uses `smking:circuit:md:{ns}`
+
+Each surface trips and recovers independently. Both still rotate with `(api_key, base_url)` and respect the same `SMKING_CIRCUIT_BREAKER` / `SMKING_CIRCUIT_BREAKER_TTL` knobs.
+
+### [medium] `smking:cache:purge` now actually forces a retry while the breaker is open
+
+The round-3 docstring told operators that `cache:purge` is the recovery path after an outage and that "next request re-fetches". In reality the command only forgot per-path AEO + markdown entries — it never touched the namespace breaker, so a purge issued during the breaker TTL window left subsequent requests short-circuiting `server_error` until the breaker expired.
+
+Round-4 makes purge clear the per-surface breaker keys alongside the path/product-id entries:
+
+- `cache:purge <path>` clears `circuit_aeo` + `circuit_md` (path may be hit by either surface next).
+- `cache:purge --product-id=N` clears `circuit_aeo` (product_id never flows through markdown).
+
+Auto-recovery still rate-limits via the breaker; purge is the explicit manual override that says "retry now".
+
+### [medium] Restored short `not_found_ttl` default — first-launch products become visible within ~1 minute
+
+Round-1..3 raised the `not_found_ttl` default from 30s to 900s (15 minutes) to absorb worker-pool stampede on million-PV sites. But `forPath()` uses POST specifically to register unseen paths for background crawling — the typical lifecycle is "first request → register → ready in 1-2 minutes". A 900s default cached the first miss for 15 minutes, masking the ready transition; the SDK kept returning `no content` long after the crawl/generate job finished, breaking fresh product launches.
+
+Round-4 restores the default to 60s. Stampede protection is already covered by:
+
+- `pending_ttl` (15s) when the SaaS sends an explicit 202 in-progress signal,
+- `circuit_breaker` (60s) for namespace-wide outage short-circuiting.
+
+`not_found` is a 4xx — the SaaS explicitly says "no content for this path", not an outage signal. 60s gives 1-minute recovery on first-launch products and still caps worker stampede to one upstream call per minute per cold path. Customers who want a longer cushion can still set `SMKING_NOT_FOUND_TTL` higher.
+
+### Tests added (5 new in this round)
+
+- `test_markdown_failure_does_not_trip_html_aeo_circuit` — proves surface isolation forward direction
+- `test_html_aeo_failure_does_not_trip_markdown_circuit` — proves surface isolation reverse direction
+- `test_circuit_breaker_keys_are_isolated_per_surface_in_cache` — direct cache-key assertion that AEO failures only set the AEO breaker
+- `test_purge_by_path_clears_both_surface_circuit_keys` — purge actually unblocks recovery
+- `test_purge_by_product_id_clears_aeo_circuit_key` — product-id purge clears the relevant breaker
+
+119 tests total (was 114).
+
+### Internal
+
+- `AeoClient::circuitKey()` / `circuitOpen()` / `tripCircuit()` now take a `'aeo' | 'md'` surface argument.
+- `AeoClient::cacheKeyPrefixes()` returns `circuit_aeo` and `circuit_md` keys for the cache-purge command.
+- `CachePurgeCommand` output now includes a `circuit → cleared` line so the operator sees the breaker state was reset.
+
 ## v0.7.0 — pre-release adversarial review fixes (round 3)
 
 Third adversarial review caught the missing pieces between per-path protection and namespace-wide protection. All folded into v0.7.0 before tagging.

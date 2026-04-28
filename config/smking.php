@@ -184,10 +184,18 @@ return [
         'store' => env('SMKING_CACHE_STORE'),
         'ttl' => env('SMKING_CACHE_TTL', 3600),
 
-        // 4xx / "path not crawled yet" — short TTL lets backend audit
-        // catch up. v0.7.0: 30s → 900s (15min). Customer can `cache:purge`
-        // for instant re-fetch after audit/generate.
-        'not_found_ttl' => env('SMKING_NOT_FOUND_TTL', 900),
+        // 4xx / "path not crawled yet" — short TTL lets the backend audit
+        // catch up. v0.7.0 round-4: 60s default (down from a brief 900s in
+        // the round-1..3 cuts). The `forPath()` POST registers the path
+        // for background crawling — a fresh product launch typically
+        // becomes ready within 1-2 minutes, so a 60s miss TTL means the
+        // very next request after crawl/generate finishes already serves
+        // ready content. The 900s default would have masked the ready
+        // transition for up to 15 minutes. Customers running extreme PV
+        // who want a longer miss cushion (worker-pool stampede protection
+        // is already covered by `pending_ttl` + `circuit_breaker`) can
+        // set `SMKING_NOT_FOUND_TTL` to a higher value.
+        'not_found_ttl' => env('SMKING_NOT_FOUND_TTL', 60),
 
         // 5xx / DNS / TCP / read timeout — long TTL since SaaS is broken.
         // v0.7.0 (new): 24hr default. Customer recovery: `cache:purge`.

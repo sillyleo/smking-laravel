@@ -151,9 +151,10 @@ class AeoClient
             return null;
         }
 
-        // Shared circuit breaker — if forPath() tripped it, getMarkdown()
-        // also short-circuits without an upstream call.
-        if ($this->circuitOpen($repository)) {
+        // Per-surface circuit breaker — markdown surface only. v0.7.0
+        // round-4: independent of the AEO breaker so a markdown outage
+        // never suppresses HTML AEO injection.
+        if ($this->circuitOpen($repository, 'md')) {
             return null;
         }
 
@@ -185,10 +186,12 @@ class AeoClient
                     : min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900));
                 $repository->put($cacheKey, false, $writeTtl);
 
-                // Shared circuit — markdown 5xx / transport failure also
-                // trips the namespace-wide breaker for forPath().
+                // v0.7.0 round-4: markdown 5xx / transport failure trips
+                // ONLY the markdown surface breaker. HTML AEO injection
+                // (forPath) keeps serving cached / live content because
+                // it talks to a different upstream endpoint.
                 if ($result['status'] === AeoResponse::STATUS_SERVER_ERROR) {
-                    $this->tripCircuit($repository);
+                    $this->tripCircuit($repository, 'md');
                 }
 
                 return;
@@ -368,14 +371,16 @@ class AeoClient
             return $cached;
         }
 
-        // v0.7.0 round-3: namespace-wide circuit breaker. Per-path 24hr
-        // server_error cache only protects keys we've already failed; a
-        // cold-key burst across N distinct URLs (catalog spray, crawler,
+        // v0.7.0 round-3 → round-4: per-surface circuit breaker. Per-path
+        // 24hr server_error cache only protects keys we've already failed;
+        // a cold-key burst across N distinct URLs (catalog spray, crawler,
         // sitemap fetch) would still each consume a full timeout before
-        // their own server_error entry lands. The circuit breaker shorts
-        // the WHOLE namespace for a configurable window after any failure,
-        // so the second URL in the burst skips the upstream call entirely.
-        if ($this->circuitOpen($repository)) {
+        // their own server_error entry lands. The breaker shorts the
+        // entire AEO surface (HTML injection) for `circuit_breaker_ttl`
+        // seconds after any failure, so the second URL in the burst skips
+        // upstream entirely. Markdown surface has its own independent
+        // breaker so an agent-only outage never trips this one.
+        if ($this->circuitOpen($repository, 'aeo')) {
             return AeoResponse::serverError();
         }
 
@@ -403,46 +408,62 @@ class AeoClient
             };
             $repository->put($cacheKey, $response, $writeTtl);
 
-            // Trip the circuit on transport / 5xx failures so the next
-            // distinct URL in this same outage window short-circuits.
+            // Trip the AEO surface circuit on transport / 5xx failures
+            // so the next distinct URL in this same outage window short-
+            // circuits. v0.7.0 round-4: only the AEO surface, never markdown.
             if ($response->status === AeoResponse::STATUS_SERVER_ERROR) {
-                $this->tripCircuit($repository);
+                $this->tripCircuit($repository, 'aeo');
             }
         });
     }
 
     /**
-     * Namespace-wide circuit breaker (v0.7.0 round-3). Tripped by writing
-     * a short-lived flag in the cache; checked at the start of each
-     * forPath() / getMarkdown() call. While the flag is present the SDK
-     * skips the upstream entirely, no matter which path is being requested.
+     * Per-surface circuit breaker (v0.7.0 round-3 → round-4). Tripped by
+     * writing a short-lived flag in the cache; checked at the start of each
+     * forPath() / getMarkdown() call against its own surface key. While the
+     * flag is present the SDK skips the upstream entirely for THAT surface,
+     * no matter which path is being requested.
+     *
+     * v0.7.0 round-4: split into 'aeo' (HTML AEO) and 'md' (markdown for
+     * agents) keys. Markdown is an agent-only optional surface — if it's
+     * unhealthy it should not suppress HTML injection, which serves every
+     * page render. Each surface tracks its own breaker and recovers
+     * independently.
      *
      * Auto half-open: the flag has TTL = `circuit_breaker_ttl` (default
-     * 60s). When it expires, the next request hits upstream — if that
-     * succeeds, the breaker stays closed. If it fails again, the breaker
-     * trips for another 60s.
+     * 60s). When it expires, the next request to that surface hits upstream
+     * — if that succeeds, the breaker stays closed. If it fails again, the
+     * breaker trips for another 60s.
      *
      * Same `(api_key, base_url)` namespace as the rest of the cache, so
-     * rotating either auto-clears the breaker.
+     * rotating either auto-clears the breaker for both surfaces.
+     *
+     * @param  'aeo'|'md'  $surface
      */
-    private function circuitKey(): string
+    private function circuitKey(string $surface): string
     {
         $cacheConfig = $this->config->get('smking.cache', []);
 
-        return ($cacheConfig['circuit_prefix'] ?? 'smking:circuit:').$this->cacheNamespace();
+        return ($cacheConfig['circuit_prefix'] ?? 'smking:circuit:').$surface.':'.$this->cacheNamespace();
     }
 
-    private function circuitOpen(\Illuminate\Contracts\Cache\Repository $repository): bool
+    /**
+     * @param  'aeo'|'md'  $surface
+     */
+    private function circuitOpen(\Illuminate\Contracts\Cache\Repository $repository, string $surface): bool
     {
         $cacheConfig = $this->config->get('smking.cache', []);
         if (! ($cacheConfig['circuit_breaker'] ?? true)) {
             return false;
         }
 
-        return $repository->has($this->circuitKey());
+        return $repository->has($this->circuitKey($surface));
     }
 
-    private function tripCircuit(\Illuminate\Contracts\Cache\Repository $repository): void
+    /**
+     * @param  'aeo'|'md'  $surface
+     */
+    private function tripCircuit(\Illuminate\Contracts\Cache\Repository $repository, string $surface): void
     {
         $cacheConfig = $this->config->get('smking.cache', []);
         if (! ($cacheConfig['circuit_breaker'] ?? true)) {
@@ -450,7 +471,7 @@ class AeoClient
         }
 
         $repository->put(
-            $this->circuitKey(),
+            $this->circuitKey($surface),
             true,
             (int) ($cacheConfig['circuit_breaker_ttl'] ?? 60),
         );
@@ -557,20 +578,31 @@ class AeoClient
     }
 
     /**
-     * Both cache key prefixes used by this client: `smking:aeo:{ns}:` for
-     * forPath() and `smking:md:{ns}:` for getMarkdown(). Used by the
-     * cache-purge command to flush both surfaces in one shot.
+     * Cache key prefixes / breaker keys used by this client. Used by the
+     * cache-purge command to flush per-path entries AND the surface-scoped
+     * circuit breakers in one shot.
      *
-     * @return array{aeo: string, markdown: string}
+     *   aeo        — `smking:aeo:{ns}:`           (forPath / forProductId)
+     *   markdown   — `smking:md:{ns}:`            (getMarkdown)
+     *   circuit_aeo — `smking:circuit:aeo:{ns}`   (HTML AEO breaker, full key)
+     *   circuit_md  — `smking:circuit:md:{ns}`    (markdown breaker, full key)
+     *
+     * v0.7.0 round-4: breaker keys split per upstream surface so a markdown
+     * outage doesn't suppress the customer-facing HTML injection path.
+     *
+     * @return array{aeo: string, markdown: string, circuit_aeo: string, circuit_md: string}
      */
     public function cacheKeyPrefixes(): array
     {
         $cacheConfig = $this->config->get('smking.cache', []);
         $ns = $this->cacheNamespace();
+        $circuitPrefix = $cacheConfig['circuit_prefix'] ?? 'smking:circuit:';
 
         return [
             'aeo' => ($cacheConfig['prefix'] ?? 'smking:aeo:').$ns.':',
             'markdown' => ($cacheConfig['markdown_prefix'] ?? 'smking:md:').$ns.':',
+            'circuit_aeo' => $circuitPrefix.'aeo:'.$ns,
+            'circuit_md' => $circuitPrefix.'md:'.$ns,
         ];
     }
 

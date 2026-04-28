@@ -116,6 +116,68 @@ class CachePurgeCommandTest extends TestCase
             ->assertExitCode(2);
     }
 
+    public function test_purge_by_path_clears_both_surface_circuit_keys(): void
+    {
+        // Round-4 (medium finding): the documented "force re-attempt"
+        // behavior for outage recovery requires breaker reset. Without
+        // it, `cache:purge` clears the per-path entries but the
+        // per-surface breakers keep short-circuiting until their TTL
+        // expires — operator runs purge, tells the customer it's
+        // resolved, but next request still gets server_error.
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response('upstream broken', 503),
+            'api.test/api/v1/public/md*' => Http::response('upstream broken', 503),
+        ]);
+
+        $client = $this->app->make(AeoClient::class);
+        $client->forPath('/products/widget');     // trips aeo breaker
+        $client->getMarkdown('/products/widget'); // trips md breaker
+
+        $store = $this->app->make(CacheRepository::class);
+        $prefixes = $client->cacheKeyPrefixes();
+
+        $this->assertTrue($store->has($prefixes['circuit_aeo']), 'aeo breaker must be primed');
+        $this->assertTrue($store->has($prefixes['circuit_md']), 'markdown breaker must be primed');
+
+        $this->artisan('smking:cache:purge', ['path' => '/products/widget'])
+            ->assertExitCode(0);
+
+        $this->assertFalse(
+            $store->has($prefixes['circuit_aeo']),
+            'aeo breaker MUST be cleared by purge so next request actually retries'
+        );
+        $this->assertFalse(
+            $store->has($prefixes['circuit_md']),
+            'markdown breaker MUST be cleared by purge — purged path may be hit by getMarkdown next'
+        );
+    }
+
+    public function test_purge_by_product_id_clears_aeo_circuit_key(): void
+    {
+        // Round-4: --product-id purge clears the AEO surface breaker.
+        // Markdown surface is left alone because product_id keys never
+        // flow through the markdown surface (which uses path keys only).
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response('upstream broken', 503),
+        ]);
+
+        $client = $this->app->make(AeoClient::class);
+        $client->forProductId(42); // trips aeo breaker
+
+        $store = $this->app->make(CacheRepository::class);
+        $prefixes = $client->cacheKeyPrefixes();
+
+        $this->assertTrue($store->has($prefixes['circuit_aeo']), 'aeo breaker must be primed');
+
+        $this->artisan('smking:cache:purge', ['--product-id' => 42])
+            ->assertExitCode(0);
+
+        $this->assertFalse(
+            $store->has($prefixes['circuit_aeo']),
+            'aeo breaker MUST be cleared by --product-id purge'
+        );
+    }
+
     public function test_purge_only_clears_current_namespace_after_key_rotation(): void
     {
         // Prime cache with one api_key

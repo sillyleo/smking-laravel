@@ -77,12 +77,24 @@ class CachePurgeCommand extends Command
         $store->forget($aeoKey);
         $store->forget($mdKey);
 
+        // v0.7.0 round-4: also clear the per-surface circuit breakers.
+        // purge is a manual recovery action — operator is explicitly
+        // saying "retry now". Without this, "next request re-fetches"
+        // (advertised in the docstring above) is false during the
+        // breaker TTL window and the operator just has to wait.
+        // Both surfaces are touched: a purged path can be hit by either
+        // forPath() or getMarkdown(), so clearing both gives deterministic
+        // recovery regardless of which surface the next request lands on.
+        $store->forget($prefixes['circuit_aeo']);
+        $store->forget($prefixes['circuit_md']);
+
         if ($rawPath !== $path) {
             $this->line("Input path canonicalized: {$rawPath} → {$path}");
         }
         $this->info("Purged smking cache for path: {$path}");
-        $this->line("  aeo  → {$aeoKey}");
-        $this->line("  md   → {$mdKey}");
+        $this->line("  aeo     → {$aeoKey}");
+        $this->line("  md      → {$mdKey}");
+        $this->line('  circuit → cleared (aeo + md surfaces)');
 
         return self::SUCCESS;
     }
@@ -106,8 +118,16 @@ class CachePurgeCommand extends Command
         $aeoKey = $prefixes['aeo'].http_build_query(['product_id' => $productId]);
         $store->forget($aeoKey);
 
+        // v0.7.0 round-4: clear the AEO surface breaker so the next call
+        // for this product (or any path) actually retries instead of
+        // serving short-circuit server_error responses for the remaining
+        // breaker TTL. Markdown breaker is left alone — product_id never
+        // touches markdown surface.
+        $store->forget($prefixes['circuit_aeo']);
+
         $this->info("Purged smking cache for product_id: {$productId}");
-        $this->line("  aeo  → {$aeoKey}");
+        $this->line("  aeo     → {$aeoKey}");
+        $this->line('  circuit → cleared (aeo surface)');
 
         return self::SUCCESS;
     }

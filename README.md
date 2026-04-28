@@ -167,7 +167,14 @@ Two complementary defenses run on every cache miss:
 
 **Single-flight cache lock** — When a path is uncached and traffic spikes, only ONE PHP-FPM worker calls smking upstream; others fail open immediately (return un-injected page). Per-path protection. Uses `Cache::lock()` (redis / memcached / database / array drivers; graceful fallback for stores without lock support).
 
-**Namespace-wide circuit breaker** — Once any path hits a 5xx / transport error, a flag is set for `circuit_breaker_ttl` seconds (default 60). While the flag is present, ALL paths short-circuit without touching the upstream. Protects against high-cardinality outage events (catalog spray, full-site crawler) where per-path cache wouldn't help — the second URL in the burst doesn't know the first one just failed. Auto half-open: when the flag expires the next request hits upstream; success closes the breaker, another failure trips it again. Disable with `SMKING_CIRCUIT_BREAKER=false` if your customer cache layer can't store namespace flags reliably.
+**Per-surface circuit breaker** — Once any path hits a 5xx / transport error, a flag is set for `circuit_breaker_ttl` seconds (default 60). While the flag is present, every path on THAT surface short-circuits without touching the upstream. Protects against high-cardinality outage events (catalog spray, full-site crawler) where per-path cache wouldn't help — the second URL in the burst doesn't know the first one just failed. Auto half-open: when the flag expires the next request hits upstream; success closes the breaker, another failure trips it again. Disable with `SMKING_CIRCUIT_BREAKER=false` if your customer cache layer can't store namespace flags reliably.
+
+Two independent breakers exist (since v0.7.0 round-4):
+
+- HTML AEO injection (`/api/v1/public/aeo`, every page render) — `smking:circuit:aeo:{ns}`
+- Markdown for agents (`/api/v1/public/md`, agent-only `Accept: text/markdown` clients) — `smking:circuit:md:{ns}`
+
+A markdown outage no longer suppresses HTML injection: the agent surface is optional, and an issue isolated there should never affect the customer-facing render path. Both surfaces still rotate together when `(api_key, base_url)` changes.
 
 ### 1. Cache absorbs most outages automatically (v0.7.0+)
 
@@ -176,7 +183,8 @@ Three-tier cache TTL since v0.7.0:
 | Status | TTL | Behavior |
 |---|---|---|
 | `ready` | 1 hour | Customer's cached AEO content keeps serving |
-| `not_found` (4xx) | 15 min | Backend audit catching up; recheck soon |
+| `not_found` (4xx) | 60 sec | Backend audit catching up; first-launch products visible within ~1 min after crawl/generate completes |
+| `pending` (202) | 15 sec | SaaS explicit "in-progress" signal — short cushion against hot-launch polling |
 | `server_error` (5xx, DNS, TCP, timeout) | **24 hours** | Don't hammer dead upstream |
 
 A million-PV-per-day site running Laravel can saturate its PHP-FPM pool when a hung upstream holds workers. The 24hr `server_error` cache means each path is retried at most once per day — outage is invisible to your traffic after the first wave fails over.
@@ -208,7 +216,15 @@ Per-path:
 php artisan smking:cache:purge /products/widget
 ```
 
-This forgets both `smking:aeo:*` and `smking:md:*` cache for that path so the next request re-fetches.
+This forgets both `smking:aeo:*` and `smking:md:*` cache for that path AND clears the per-surface circuit breakers so the next request actually re-fetches (no waiting for breaker TTL). Use this whenever you've fixed something upstream and want immediate recovery on a specific path.
+
+Per WC product:
+
+```bash
+php artisan smking:cache:purge --product-id=42
+```
+
+Clears the AEO-surface entry for that product plus the AEO-surface circuit breaker.
 
 For wholesale recovery (clears the whole app cache):
 

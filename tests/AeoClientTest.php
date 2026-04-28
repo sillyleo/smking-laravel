@@ -435,6 +435,88 @@ class AeoClientTest extends TestCase
         Http::assertSentCount(1);
     }
 
+    // ── Round-4: per-surface circuit breaker isolation ───────────
+
+    public function test_markdown_failure_does_not_trip_html_aeo_circuit(): void
+    {
+        // Round-4 (high finding): markdown is an agent-only optional
+        // surface. A markdown 5xx MUST NOT suppress HTML AEO injection,
+        // which serves every page render. Pre-fix: a single shared
+        // breaker would short-circuit forPath() for the full breaker
+        // TTL after a markdown outage.
+        config()->set('smking.cache.enabled', true);
+
+        Http::fake([
+            'api.test/api/v1/public/md*' => Http::response('upstream broken', 503),
+            'api.test/api/v1/public/aeo' => Http::response(['status' => 'ready'], 200),
+        ]);
+
+        $client = $this->app->make(AeoClient::class);
+
+        // Markdown 5xx → trips MD breaker, doesn't touch AEO breaker
+        $client->getMarkdown('/products/widget');
+        Http::assertSentCount(1);
+
+        // forPath must still hit upstream because the AEO breaker is
+        // independent. Pre-fix this would short-circuit and never send.
+        $response = $client->forPath('/products/widget');
+        $this->assertTrue($response->isReady());
+        Http::assertSentCount(2); // both calls actually went out
+    }
+
+    public function test_html_aeo_failure_does_not_trip_markdown_circuit(): void
+    {
+        // Round-4 (high finding): reverse direction. HTML AEO 5xx must
+        // not block subsequent markdown calls. Real-world it's likely
+        // both surfaces share the same SaaS upstream, but the SDK's
+        // breaker semantics still need to be per-surface so a partial
+        // outage on one endpoint doesn't suppress the other.
+        config()->set('smking.cache.enabled', true);
+
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response('upstream broken', 503),
+            'api.test/api/v1/public/md*' => Http::response("# md\n", 200),
+        ]);
+
+        $client = $this->app->make(AeoClient::class);
+
+        // HTML 5xx → trips AEO breaker, doesn't touch MD breaker
+        $client->forPath('/products/widget');
+        Http::assertSentCount(1);
+
+        // getMarkdown must still hit upstream; MD breaker is independent
+        $body = $client->getMarkdown('/products/widget');
+        $this->assertSame("# md\n", $body);
+        Http::assertSentCount(2);
+    }
+
+    public function test_circuit_breaker_keys_are_isolated_per_surface_in_cache(): void
+    {
+        // Round-4 (high finding): inspect the underlying breaker keys
+        // directly to confirm forPath() failures only set the AEO breaker
+        // and never collide with the markdown breaker key.
+        config()->set('smking.cache.enabled', true);
+
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response('upstream broken', 503),
+        ]);
+
+        $client = $this->app->make(AeoClient::class);
+        $client->forPath('/x');
+
+        $store = $this->app->make(\Illuminate\Contracts\Cache\Repository::class);
+        $prefixes = $client->cacheKeyPrefixes();
+
+        $this->assertTrue(
+            $store->has($prefixes['circuit_aeo']),
+            'AEO breaker must trip after forPath 5xx'
+        );
+        $this->assertFalse(
+            $store->has($prefixes['circuit_md']),
+            'markdown breaker MUST NOT trip from an AEO-only failure'
+        );
+    }
+
     // ── Connect/read timeout split (v0.7.0, #3) ───────────────────
 
     public function test_connect_timeout_and_read_timeout_passed_separately(): void
