@@ -268,4 +268,42 @@ return [
     */
     'connect_timeout' => env('SMKING_CONNECT_TIMEOUT', 1.0),
     'timeout' => env('SMKING_HTTP_TIMEOUT', 1.5),
+
+    /*
+    |--------------------------------------------------------------------------
+    | robots.txt augmentation (v0.8.0)
+    |--------------------------------------------------------------------------
+    |
+    | Run `php artisan smking:publish-robots` to write these directives into
+    | public/robots.txt. The command merges into the customer's existing
+    | robots.txt — rules above the smking-managed block survive untouched,
+    | and re-runs replace just the managed block (fenced by versioned
+    | marker comments) instead of duplicating.
+    |
+    | Why a publish command and not auto-injection: nginx / Apache serve
+    | public/robots.txt directly without invoking PHP, so middleware can
+    | never influence that response. The only reliable surface is the
+    | static file itself, and silently mutating the customer's public/
+    | directory on package install is rude. Explicit command, opt-in.
+    |
+    | Default policy: allow major search + AI crawlers (GPTBot, ClaudeBot,
+    | PerplexityBot, Google-Extended, Bingbot, Applebot-Extended) for
+    | discovery, and emit `Content-Signal: search=yes, ai-input=no,
+    | ai-train=no` so AI services can index for retrieval but won't use
+    | the content for training. Override per-bot or globally in the
+    | published config.
+    |
+    */
+    'robots' => [
+        'bots' => [
+            'GPTBot' => 'allow',
+            'ChatGPT-User' => 'allow',
+            'ClaudeBot' => 'allow',
+            'PerplexityBot' => 'allow',
+            'Google-Extended' => 'allow',
+            'Bingbot' => 'allow',
+            'Applebot-Extended' => 'allow',
+        ],
+        'content_signal' => 'search=yes, ai-input=no, ai-train=no',
+    ],
 ];
