@@ -12,6 +12,7 @@ use ReflectionException;
 use Smking\Laravel\Console\CachePurgeCommand;
 use Smking\Laravel\Console\CircuitStatusCommand;
 use Smking\Laravel\Console\DoctorCommand;
+use Smking\Laravel\Console\PublishRobotsTxtCommand;
 use Smking\Laravel\Http\Middleware\InjectAeo;
 use Smking\Laravel\View\Components\Aeo as AeoComponent;
 use Smking\Laravel\View\Components\Meta as MetaComponent;
@@ -60,6 +61,7 @@ class SmkingServiceProvider extends ServiceProvider
                 DoctorCommand::class,
                 CachePurgeCommand::class,
                 CircuitStatusCommand::class,
+                PublishRobotsTxtCommand::class,
             ]);
         }
     }

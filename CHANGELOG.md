@@ -1,5 +1,89 @@
 # Changelog
 
+## v0.8.0 — `smking:publish-robots` artisan command for AI bot rules + Content-Signal
+
+Surfaced by an `isitagentready.com` audit on a customer's Laravel storefront: the site failed two of the four discoverability/access checks that AI agents look for in `robots.txt` — explicit `User-agent:` blocks for GPTBot / ClaudeBot / PerplexityBot / Google-Extended (RFC 9309), and Cloudflare's `Content-Signal:` directive that gates AI training vs retrieval separately. Both are static-file concerns: nginx and Apache serve `public/robots.txt` directly without invoking PHP, so the existing `InjectAeo` middleware can't influence that response no matter how clever it gets. The only reliable surface is the file itself.
+
+### feat: `php artisan smking:publish-robots`
+
+The new command merges the configured AI bot rules + Content-Signal directive into the customer's existing `public/robots.txt`. Re-running replaces only the smking-managed block (fenced by `# {smking-aeo-block-start v1}` / `# {smking-aeo-block-end}`) — customer rules above the block survive untouched, and the merge is idempotent so CI pipelines can run it on every deploy without growing the file each pass.
+
+```
+# customer's existing rules (untouched)
+User-agent: *
+Disallow: /admin/
+Disallow: /cart/
+
+# {smking-aeo-block-start v1}
+
+User-agent: GPTBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+User-agent: *
+Content-Signal: search=yes, ai-input=no, ai-train=no
+# {smking-aeo-block-end}
+```
+
+### Why a publish command and not auto-injection on every request
+
+Three reasons stacked:
+
+1. **The webserver wins.** When `public/robots.txt` exists as a static file, nginx/Apache serve it before the request ever reaches PHP. We can't intercept what we never see.
+2. **Silent file mutation is rude.** `composer require smking/laravel` should not write into the customer's `public/` directory unprompted. An explicit `php artisan smking:publish-robots` is the customer's affirmative consent that smking can manage the file.
+3. **Idempotent re-runs make CI integration trivial.** Customers who want this in their deploy pipeline add one line; subsequent runs without policy changes are no-ops (mtime preserved, no rewrites).
+
+### Config
+
+```php
+// config/smking.php
+'robots' => [
+    'bots' => [
+        'GPTBot' => 'allow',
+        'ChatGPT-User' => 'allow',
+        'ClaudeBot' => 'allow',
+        'PerplexityBot' => 'allow',
+        'Google-Extended' => 'allow',
+        'Bingbot' => 'allow',
+        'Applebot-Extended' => 'allow',
+    ],
+    'content_signal' => 'search=yes, ai-input=no, ai-train=no',
+],
+```
+
+The default policy allows major search + AI crawlers for discovery and emits a Content-Signal that permits search indexing but disallows AI training/input use. Customers with stricter requirements (no AI access at all) override to `'GPTBot' => 'disallow'` etc., or set a different `content_signal` string.
+
+### Tests
+
+13 new tests across `RobotsTxtBuilderTest` (pure-function merge logic — empty input, append-to-existing, replace-managed-block, idempotency, disallow rule emission, signal-only mode) and `PublishRobotsTxtCommandTest` (end-to-end: file creation, customer-rule preservation, re-run replacement, no-op when up-to-date, INVALID exit when both bots and signal are empty). Each command test sandboxes `public/` inside a tempdir via `$app->usePublicPath()` so the suite never touches a real filesystem path.
+
+Total suite: 146 tests, 385 assertions, all passing.
+
+### Composer constraint reminder for customers
+
+This is a 0.x minor bump (0.7 → 0.8), which Composer treats as breaking:
+
+```
+"smking/laravel": "^0.7"  # locks to >=0.7.0 <0.8.0 — won't pull 0.8.0
+"smking/laravel": "^0.8"  # locks to >=0.8.0 <0.9.0 — pulls this release
+```
+
+Customers on `^0.7` need to bump the constraint to `^0.8` and `composer update smking/laravel` to receive the new command. Existing v0.7.x sites continue working unchanged — there are no behavior changes to `InjectAeo` middleware, `AeoClient`, or any previously published config keys.
+
 ## v0.7.4 — config fail-open when SDK vendor is missing
 
 Real customer hit on the sleepytofu.com Laravel deploy: `composer.lock` was out of sync with `composer.json`, so the production CI's `composer install --no-interaction` skipped `smking/laravel` (lock-strict mode) but left the previously-published `config/smking.php` in place. Laravel boot then loaded the config, hit `'except' => Defaults::EXCEPT_PATTERNS` at line 108, and crashed the entire app with `Class "Smking\Laravel\Defaults" not found` — every page on the site went 500 until they fixed the lock.
