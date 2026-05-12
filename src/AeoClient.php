@@ -617,6 +617,106 @@ class AeoClient
         }
     }
 
+    /**
+     * Fetch a managed file (sitemap.xml / robots.txt / llms.txt) from the
+     * smking SaaS for path-takeover. Used by InjectAeo middleware when the
+     * customer's own app would 404 on that path.
+     *
+     * Cached separately from forPath() / getMarkdown() — different value type
+     * + different TTL strategy. Daily TTL by default (files don't change
+     * second-to-second). On any failure returns null so middleware falls
+     * back to the original customer response (don't break the site).
+     *
+     * @param  'sitemap'|'robots'|'llms_txt'  $kind
+     * @return array{body: string, contentType: string}|null
+     */
+    public function fetchPublicFile(string $kind): ?array
+    {
+        $apiKey = $this->apiKey();
+        if ($apiKey === null || $this->baseUrl() === null) {
+            return null;
+        }
+
+        $endpoint = match ($kind) {
+            'sitemap' => '/api/v1/public/sitemap.xml',
+            'robots' => '/api/v1/public/robots.txt',
+            'llms_txt' => '/api/v1/public/llms-txt',
+            default => null,
+        };
+        if ($endpoint === null) {
+            return null;
+        }
+
+        $cacheConfig = $this->config->get('smking.cache', []);
+        $enabled = (bool) ($cacheConfig['enabled'] ?? true);
+        $store = $cacheConfig['store'] ?? null;
+        $repository = $store ? $this->cache->store($store) : $this->cache->store();
+
+        $cacheKey = 'smking:takeover:'.$this->cacheNamespace().':'.$kind;
+        $ttl = (int) ($cacheConfig['takeover_ttl'] ?? 86400); // 24h default
+
+        if ($enabled && $ttl > 0) {
+            $cached = $repository->get($cacheKey);
+            if (is_array($cached) && isset($cached['body'], $cached['contentType'])) {
+                return $cached;
+            }
+            // Cached miss → don't re-fetch every request when SaaS already said
+            // "nope". Short TTL on misses so customers see fixes promptly.
+            if ($cached === false) {
+                return null;
+            }
+        }
+
+        try {
+            $response = $this->http
+                ->connectTimeout($this->connectTimeout())
+                ->timeout($this->readTimeout())
+                ->get($this->endpoint($endpoint), ['key' => $apiKey]);
+        } catch (Throwable $e) {
+            $this->logger?->warning('smking: takeover fetch failed', [
+                'kind' => $kind,
+                'message' => $e->getMessage(),
+            ]);
+            if ($enabled && $ttl > 0) {
+                $missTtl = min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900));
+                $repository->put($cacheKey, false, $missTtl);
+            }
+
+            return null;
+        }
+
+        if (! $response->successful()) {
+            if ($enabled && $ttl > 0) {
+                $missTtl = $response->status() >= 500
+                    ? (int) ($cacheConfig['server_error_ttl'] ?? 86400)
+                    : min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900));
+                $repository->put($cacheKey, false, $missTtl);
+            }
+
+            return null;
+        }
+
+        $result = [
+            'body' => $response->body(),
+            'contentType' => (string) $response->header('Content-Type') ?: $this->defaultContentTypeFor($kind),
+        ];
+
+        if ($enabled && $ttl > 0) {
+            $repository->put($cacheKey, $result, $ttl);
+        }
+
+        return $result;
+    }
+
+    private function defaultContentTypeFor(string $kind): string
+    {
+        return match ($kind) {
+            'sitemap' => 'application/xml; charset=utf-8',
+            'robots', 'llms_txt' => 'text/plain; charset=utf-8',
+            default => 'text/plain; charset=utf-8',
+        };
+    }
+
     private function apiKey(): ?string
     {
         $key = $this->config->get('smking.api_key');

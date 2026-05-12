@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.9.0 — Path-takeover: middleware auto-serves `/sitemap.xml`, `/robots.txt`, `/llms.txt`
+
+Customers with broken or missing SEO/AEO infrastructure files (no sitemap at all, missing `robots.txt`, no `llms.txt` for AI agents) had no way to benefit from smking without manually adding routes or running CLI commands. Agent-readiness audits kept reporting these as fail even though smking had complete page inventory data (via `site_pages`) and ready content (via `product_content`).
+
+This release makes the SDK the auto-maintainer of those three canonical files. Installation = consent to smking serving them on the customer's behalf. Customer's own valid 200 response is never overridden.
+
+### feat: `InjectAeo` middleware path-takeover branch
+
+When the customer's app returns 404 (or 200 with empty body) for `/sitemap.xml`, `/robots.txt`, or `/llms.txt`, the middleware:
+
+- looks up the path against `takeover.*` config flag (default `true`),
+- fetches the corresponding smking SaaS endpoint via the new `AeoClient::fetchPublicFile()` (24h per-kind cache),
+- replaces the response body with the SaaS content,
+- sets `X-Smking-Takeover: <kind>` header so the smking audit can confirm the takeover engaged.
+
+Customer's own 200 response (their existing sitemap generator, manual robots.txt etc.) is left strictly alone — explicit takeover of a working customer file would be hostile. Per-file opt-out via `config/smking.php`:
+
+```php
+'takeover' => [
+    'sitemap'   => true,   // false to leave /sitemap.xml entirely to your app
+    'robots'    => true,
+    'llms_txt'  => true,
+],
+```
+
+SaaS unreachable → fail open, original customer 404 preserved (don't break the site).
+
+### Why this matters
+
+Agent-readiness checks for `sitemap_xml` and `robots_txt` now move into the SDK-auto-fixable set on the SaaS side. Audits will start reporting `pass · smking 接管中` for sites running v0.9.0+, instead of `fail` followed by "please write your own sitemap." No customer action required beyond the install.
+
+### Composer constraint reminder
+
+Upgrading from `^0.8` requires bumping your `composer.json` constraint to `^0.9` — Composer's caret rule treats minor bumps on `0.x` as breaking. Once bumped, future `0.9.x` patches install automatically.
+
 ## v0.8.0 — `smking:publish-robots` artisan command for AI bot rules + Content-Signal
 
 Surfaced by an `isitagentready.com` audit on a customer's Laravel storefront: the site failed two of the four discoverability/access checks that AI agents look for in `robots.txt` — explicit `User-agent:` blocks for GPTBot / ClaudeBot / PerplexityBot / Google-Extended (RFC 9309), and Cloudflare's `Content-Signal:` directive that gates AI training vs retrieval separately. Both are static-file concerns: nginx and Apache serve `public/robots.txt` directly without invoking PHP, so the existing `InjectAeo` middleware can't influence that response no matter how clever it gets. The only reliable surface is the file itself.

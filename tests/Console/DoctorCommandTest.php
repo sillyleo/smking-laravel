@@ -41,8 +41,14 @@ class DoctorCommandTest extends TestCase
     {
         // POST to /api/v1/public/aeo with empty body → 400 (validation
         // failure) is the canonical "endpoint exists" signal post-v0.2.3.
+        // v0.9.0+: doctor also live-probes the three takeover endpoints
+        // (sitemap.xml / robots.txt / llms-txt) so each must respond 200
+        // for "all checks pass".
         Http::fake([
             'api.test/api/v1/public/aeo' => Http::response(['error' => 'missing key'], 400),
+            'api.test/api/v1/public/sitemap.xml*' => Http::response('<urlset/>', 200),
+            'api.test/api/v1/public/robots.txt*' => Http::response("User-agent: *\nAllow: /\n", 200),
+            'api.test/api/v1/public/llms-txt*' => Http::response("# index\n", 200),
         ]);
 
         $exit = $this->artisan('smking:doctor', ['--path' => '/'])->run();
@@ -112,6 +118,9 @@ class DoctorCommandTest extends TestCase
 
         Http::fake([
             'api.test/api/v1/public/aeo' => Http::response([], 400),
+            'api.test/api/v1/public/sitemap.xml*' => Http::response('<urlset/>', 200),
+            'api.test/api/v1/public/robots.txt*' => Http::response('', 200),
+            'api.test/api/v1/public/llms-txt*' => Http::response('', 200),
         ]);
 
         $exit = $this->artisan('smking:doctor')->run();
@@ -163,6 +172,9 @@ class DoctorCommandTest extends TestCase
 
         Http::fake([
             'api.test/api/v1/public/aeo' => Http::response([], 400),
+            'api.test/api/v1/public/sitemap.xml*' => Http::response('<urlset/>', 200),
+            'api.test/api/v1/public/robots.txt*' => Http::response('', 200),
+            'api.test/api/v1/public/llms-txt*' => Http::response('', 200),
         ]);
 
         $exit = $this->artisan('smking:doctor')->run();
@@ -185,5 +197,57 @@ class DoctorCommandTest extends TestCase
         \Illuminate\Support\Facades\Artisan::call('smking:doctor', [], $output);
 
         $this->assertStringContainsString('drift check skipped', $output->fetch());
+    }
+
+    public function test_doctor_reports_takeover_flag_state_per_file(): void
+    {
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response([], 400),
+            'api.test/api/v1/public/sitemap.xml*' => Http::response('<urlset/>', 200),
+            'api.test/api/v1/public/robots.txt*' => Http::response('', 200),
+            'api.test/api/v1/public/llms-txt*' => Http::response('', 200),
+        ]);
+
+        // Disable sitemap takeover, leave the other two on their default true.
+        config(['smking.takeover' => ['sitemap' => false]]);
+
+        $output = new \Symfony\Component\Console\Output\BufferedOutput();
+        \Illuminate\Support\Facades\Artisan::call('smking:doctor', [], $output);
+        $log = $output->fetch();
+
+        $this->assertStringContainsString('Takeover /sitemap.xml', $log);
+        $this->assertStringContainsString('disabled', $log);
+        $this->assertStringContainsString('Takeover /robots.txt', $log);
+        $this->assertStringContainsString('Takeover /llms.txt', $log);
+    }
+
+    public function test_doctor_passes_when_takeover_endpoints_return_2xx(): void
+    {
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response([], 400),
+            'api.test/api/v1/public/sitemap.xml*' => Http::response('<urlset/>', 200),
+            'api.test/api/v1/public/robots.txt*' => Http::response("User-agent: *\nAllow: /\n", 200),
+            'api.test/api/v1/public/llms-txt*' => Http::response("# index\n", 200),
+        ]);
+
+        $output = new \Symfony\Component\Console\Output\BufferedOutput();
+        \Illuminate\Support\Facades\Artisan::call('smking:doctor', [], $output);
+        $log = $output->fetch();
+
+        $this->assertStringContainsString('Takeover endpoint sitemap', $log);
+        $this->assertStringContainsString('HTTP 200', $log);
+    }
+
+    public function test_doctor_fails_when_takeover_endpoint_returns_401(): void
+    {
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response([], 400),
+            'api.test/api/v1/public/sitemap.xml*' => Http::response('Unauthorized', 401),
+            'api.test/api/v1/public/robots.txt*' => Http::response('', 200),
+            'api.test/api/v1/public/llms-txt*' => Http::response('', 200),
+        ]);
+
+        $exit = $this->artisan('smking:doctor')->run();
+        $this->assertSame(1, $exit);
     }
 }
