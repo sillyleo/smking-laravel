@@ -202,11 +202,14 @@ class AeoClientTest extends TestCase
         $this->assertSame(AeoResponse::STATUS_SERVER_ERROR, $response->status);
     }
 
-    public function test_server_error_caches_for_24_hours_by_default(): void
+    public function test_server_error_caches_under_subsequent_call_protection(): void
     {
         config()->set('smking.cache.enabled', true);
         config()->set('smking.cache.ttl', 3600);
-        // server_error_ttl default is 86400 (24hr)
+        // v0.10.0: first failure now caches for 30s (adaptive backoff first
+        // step) rather than the legacy flat 24hr. Subsequent call within
+        // that window must still hit cache — this test verifies the
+        // FPM-saturation-prevention guarantee survives the backoff change.
 
         Http::fake([
             '*' => Http::response('upstream broken', 503),
@@ -216,8 +219,150 @@ class AeoClientTest extends TestCase
         $client->forPath('/dead');
         Http::assertSentCount(1);
 
-        // Subsequent call within the 24hr window must hit cache, NOT re-try
-        // the dead upstream — this is the FPM-saturation prevention.
+        // Subsequent call within the 30s first-step window must hit cache,
+        // NOT re-try the dead upstream.
+        $client->forPath('/dead');
+        Http::assertSentCount(1);
+    }
+
+    // ── v0.10.0 adaptive backoff ──────────────────────────────────
+
+    public function test_server_error_first_failure_caches_for_30_seconds(): void
+    {
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cache.server_error_backoff', [30, 300, 1800]);
+        config()->set('smking.cache.circuit_breaker', false);
+
+        Http::fake(['*' => Http::response('boom', 503)]);
+
+        $client = $this->app->make(AeoClient::class);
+        $client->forPath('/dead');
+        Http::assertSentCount(1);
+
+        // 29s later — still within 30s window, cache hit
+        $this->travel(29)->seconds();
+        $client->forPath('/dead');
+        Http::assertSentCount(1);
+
+        // 31s after first call — cache expired, SDK retries upstream.
+        // This is the key value of backoff: an install-time typo /
+        // firewall fix recovers within seconds, not 24 hours.
+        $this->travel(2)->seconds();
+        $client->forPath('/dead');
+        Http::assertSentCount(2);
+    }
+
+    public function test_server_error_escalates_through_backoff_steps(): void
+    {
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cache.server_error_backoff', [30, 300, 1800]);
+        config()->set('smking.cache.circuit_breaker', false);
+
+        Http::fake(['*' => Http::response('boom', 503)]);
+
+        $client = $this->app->make(AeoClient::class);
+
+        $client->forPath('/dead');                  // fail #1 → cache 30s
+        $this->travel(31)->seconds();
+        $client->forPath('/dead');                  // fail #2 → cache 300s
+        Http::assertSentCount(2);
+
+        // 299s after fail #2 — still within the 5min window, cache hit
+        $this->travel(299)->seconds();
+        $client->forPath('/dead');
+        Http::assertSentCount(2);
+
+        // 301s after fail #2 — cache expired, fail #3 → cache 1800s
+        $this->travel(2)->seconds();
+        $client->forPath('/dead');
+        Http::assertSentCount(3);
+
+        // 1799s after fail #3 — still in 30min window
+        $this->travel(1799)->seconds();
+        $client->forPath('/dead');
+        Http::assertSentCount(3);
+    }
+
+    public function test_server_error_falls_back_to_long_ttl_after_steps_exhausted(): void
+    {
+        config()->set('smking.cache.enabled', true);
+        // Tight backoff so we can burn through quickly without absurd travel.
+        config()->set('smking.cache.server_error_backoff', [10, 20, 30]);
+        config()->set('smking.cache.server_error_ttl', 86400);
+        config()->set('smking.cache.circuit_breaker', false);
+
+        Http::fake(['*' => Http::response('boom', 503)]);
+
+        $client = $this->app->make(AeoClient::class);
+
+        $client->forPath('/dead');                  // fail #1 → 10s
+        $this->travel(11)->seconds();
+        $client->forPath('/dead');                  // fail #2 → 20s
+        $this->travel(21)->seconds();
+        $client->forPath('/dead');                  // fail #3 → 30s
+        $this->travel(31)->seconds();
+        $client->forPath('/dead');                  // fail #4 → fallback 24hr
+        Http::assertSentCount(4);
+
+        // Within the 24hr fallback window — cache hit, no retry
+        $this->travel(86399)->seconds();
+        $client->forPath('/dead');
+        Http::assertSentCount(4);
+    }
+
+    public function test_ready_response_resets_backoff_counter(): void
+    {
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cache.ttl', 3600);
+        config()->set('smking.cache.server_error_backoff', [30, 300, 1800]);
+        config()->set('smking.cache.circuit_breaker', false);
+
+        Http::fakeSequence()
+            ->push('boom', 503)                       // fail #1
+            ->push(['status' => 'ready', 'jsonLd' => ['@type' => 'Product']], 200)
+            ->push('boom', 503)                       // post-reset fail #1
+            ->push('boom', 503);                      // post-reset fail #2 (cache-expiry retry)
+
+        $client = $this->app->make(AeoClient::class);
+
+        $client->forPath('/path');                    // fail → counter=1, cache 30s
+        $this->travel(31)->seconds();
+        $client->forPath('/path');                    // ready! → reset counter, cache 3600s
+        Http::assertSentCount(2);
+
+        // travel past ready ttl so the next call retries upstream
+        $this->travel(3601)->seconds();
+        $client->forPath('/path');                    // fail → counter=1 (reset), cache 30s
+        Http::assertSentCount(3);
+
+        // 29s — still within 30s window. Without the counter reset, the
+        // post-recovery failure would have used the 300s step (counter=2).
+        $this->travel(29)->seconds();
+        $client->forPath('/path');
+        Http::assertSentCount(3);
+
+        // 32s — cache expired, would retry. Confirms TTL was 30s, not 300s.
+        $this->travel(3)->seconds();
+        $client->forPath('/path');
+        Http::assertSentCount(4);
+    }
+
+    public function test_server_error_backoff_can_be_disabled_via_empty_array(): void
+    {
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cache.server_error_backoff', []);
+        config()->set('smking.cache.server_error_ttl', 86400);
+        config()->set('smking.cache.circuit_breaker', false);
+
+        Http::fake(['*' => Http::response('boom', 503)]);
+
+        $client = $this->app->make(AeoClient::class);
+        $client->forPath('/dead');
+        Http::assertSentCount(1);
+
+        // With backoff disabled, first failure uses the flat
+        // server_error_ttl (24hr) directly — pre-v0.10.0 behavior.
+        $this->travel(86399)->seconds();
         $client->forPath('/dead');
         Http::assertSentCount(1);
     }

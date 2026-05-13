@@ -77,6 +77,13 @@ class CachePurgeCommand extends Command
         $store->forget($aeoKey);
         $store->forget($mdKey);
 
+        // v0.10.0: clear the adaptive-backoff failure counters too. Without
+        // this, purge would reset the cache value but leave the counter at
+        // (say) 3, so the next upstream failure would jump straight to the
+        // 30-minute backoff step instead of restarting at 30s.
+        $store->forget($aeoKey.':fc');
+        $store->forget($mdKey.':fc');
+
         // v0.7.0 round-4: also clear the per-surface circuit breakers.
         // purge is a manual recovery action — operator is explicitly
         // saying "retry now". Without this, "next request re-fetches"
@@ -117,6 +124,9 @@ class CachePurgeCommand extends Command
         // separate path-based purge.
         $aeoKey = $prefixes['aeo'].http_build_query(['product_id' => $productId]);
         $store->forget($aeoKey);
+
+        // v0.10.0: clear the adaptive-backoff failure counter too.
+        $store->forget($aeoKey.':fc');
 
         // v0.7.0 round-4: clear the AEO surface breaker so the next call
         // for this product (or any path) actually retries instead of

@@ -177,18 +177,20 @@ Two independent breakers exist (since v0.7.0 round-4):
 
 A markdown outage no longer suppresses HTML injection: the agent surface is optional, and an issue isolated there should never affect the customer-facing render path. Both surfaces still rotate together when `(api_key, base_url)` changes.
 
-### 1. Cache absorbs most outages automatically (v0.7.0+)
+### 1. Cache absorbs most outages automatically (v0.7.0+, refined in v0.10.0)
 
-Three-tier cache TTL since v0.7.0:
+Four-tier cache TTL with adaptive backoff on errors:
 
 | Status | TTL | Behavior |
 |---|---|---|
 | `ready` | 1 hour | Customer's cached AEO content keeps serving |
 | `not_found` (4xx) | 60 sec | Backend audit catching up; first-launch products visible within ~1 min after crawl/generate completes |
 | `pending` (202) | 15 sec | SaaS explicit "in-progress" signal — short cushion against hot-launch polling |
-| `server_error` (5xx, DNS, TCP, timeout) | **24 hours** | Don't hammer dead upstream |
+| `server_error` (5xx, DNS, TCP, timeout) | **30s → 5min → 30min → 24hr** | Adaptive backoff per consecutive failure (v0.10.0+) |
 
-A million-PV-per-day site running Laravel can saturate its PHP-FPM pool when a hung upstream holds workers. The 24hr `server_error` cache means each path is retried at most once per day — outage is invisible to your traffic after the first wave fails over.
+The `server_error` ladder is keyed by consecutive-failure count for each cache key independently. A first failure (typical of an install-time typo or transient network blip) caches for 30 seconds — auto-recovers without operator intervention once the underlying issue is fixed. Steady-state outage protection kicks in by failure #4 at the full 24hr fallback, preserving the FPM-pool-saturation defense that made the flat 24hr TTL necessary in v0.7.0.
+
+A successful `ready` response resets the counter, so the next outage starts at 30s again. Customize the ladder via `cache.server_error_backoff` in `config/smking.php`, or set to `[]` to disable backoff and restore the pre-v0.10.0 flat 24hr behavior.
 
 ### 2. Tighten timeouts further if you're at scale
 

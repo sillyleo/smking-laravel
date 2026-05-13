@@ -217,8 +217,27 @@ return [
         'not_found_ttl' => env('SMKING_NOT_FOUND_TTL', 60),
 
         // 5xx / DNS / TCP / read timeout — long TTL since SaaS is broken.
-        // v0.7.0 (new): 24hr default. Customer recovery: `cache:purge`.
+        // v0.10.0: adaptive backoff replaces flat 24hr — see
+        // `server_error_backoff` below. `server_error_ttl` is now the
+        // fallback TTL once backoff steps are exhausted (4th+ consecutive
+        // failure on a key).
         'server_error_ttl' => env('SMKING_SERVER_ERROR_TTL', 86400),
+
+        // v0.10.0: adaptive backoff for server_error cache TTL. Per-key
+        // counter (alongside the cache entry, auto-clears on `ready` /
+        // `cache:purge` / namespace rotation) drives this lookup so each
+        // path's backoff progresses independently.
+        //
+        //   1st failure → 30s     — typical install typo / firewall fix
+        //                           recovers within a minute
+        //   2nd failure → 5min    — coffee-break-scale fix window
+        //   3rd failure → 30min   — operator-response window
+        //   4th+        → falls through to server_error_ttl (24hr)
+        //
+        // Customize for tighter / looser recovery cadence. Set to `[]` or
+        // `false` to disable adaptive backoff entirely and use the
+        // pre-v0.10.0 flat `server_error_ttl` behavior.
+        'server_error_backoff' => [30, 300, 1800],
 
         // Pending (202 from SaaS — backlog still crawling). v0.7.0 round-3:
         // cache for short window so a hot-launch URL doesn't hammer the
