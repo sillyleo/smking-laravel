@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.10.1 — `smking:doctor --json` for machine-readable output
+
+Adds a `--json` flag to `php artisan smking:doctor` that emits the check results as structured JSON instead of the pretty-printed report. Designed for tooling that needs to parse doctor results programmatically — specifically the new `@smking/wizard` install agent, which uses it to decide between "all green → done" and "failure → retry / file ticket" without scraping ANSI-coloured terminal output.
+
+Pure addition — no behavioural change to the default `php artisan smking:doctor` invocation. Customers don't need to act unless they're hooking doctor into CI or external tooling.
+
+### Shape
+
+```json
+{
+  "checks": [
+    { "status": "pass" | "fail" | "info", "label": "...", "detail": "..." }
+  ],
+  "summary": { "passed": N, "failed": N, "info": N, "ok": <bool> }
+}
+```
+
+`summary.ok` short-circuits agentic consumers — `true` means every required check passed (no `fail`). Exit code is still `0` on success, `1` on any failure, identical to the non-JSON path.
+
+### Why
+
+The `@smking/wizard` CLI runs doctor as the last step of a self-driving install. Parsing the pretty-printed output meant either fragile regex scraping or coupling the wizard release cycle to internal doctor output strings. Structured JSON gives the wizard a stable contract that the SDK can keep maintaining without breaking the agent.
+
 ## v0.10.0 — Adaptive backoff for `server_error` cache: install typos auto-recover in 30s, not 24hr
 
 Surfaced by a customer install (sleepytofu.com) that 卡在 `X-Smking-Status: server_error` for two days despite the operator fixing the underlying configuration mid-way. Diagnosis: the SDK had cached the very first failed upstream call for the full v0.7.0 `server_error_ttl` (24hr) and the circuit breaker had tripped on top of that — even after the operator fixed `SMKING_BASE_URL` and restarted PHP-FPM, no path would re-attempt the upstream until the customer ran `smking:cache:purge` manually.

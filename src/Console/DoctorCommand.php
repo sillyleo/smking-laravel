@@ -26,7 +26,7 @@ use Throwable;
  */
 class DoctorCommand extends Command
 {
-    protected $signature = 'smking:doctor {--path=__smking-doctor : Path to probe AEO status for (uses a synthetic path by default to avoid registering real URLs in the audit queue)}';
+    protected $signature = 'smking:doctor {--path=__smking-doctor : Path to probe AEO status for (uses a synthetic path by default to avoid registering real URLs in the audit queue)} {--json : Output structured JSON instead of the pretty-printed report (used by the @smking/wizard install agent)}';
 
     protected $description = 'Verify smking SDK install + connectivity';
 
@@ -44,16 +44,25 @@ class DoctorCommand extends Command
             ...$this->checkTakeoverSaasEndpoints($http),
         ];
 
-        foreach ($checks as $check) {
-            $this->renderCheck($check);
-        }
-
         $hasFailure = false;
         foreach ($checks as $check) {
             if ($check['status'] === 'fail') {
                 $hasFailure = true;
                 break;
             }
+        }
+
+        // JSON mode: skip pretty rendering entirely so stdout is parseable
+        // by the @smking/wizard install agent. Caller does JSON.parse on the
+        // full stdout.
+        if ($this->option('json')) {
+            $this->renderJson($checks, $hasFailure);
+
+            return $hasFailure ? self::FAILURE : self::SUCCESS;
+        }
+
+        foreach ($checks as $check) {
+            $this->renderCheck($check);
         }
 
         $this->newLine();
@@ -66,6 +75,44 @@ class DoctorCommand extends Command
         $this->line('<info>smking: install OK.</info>');
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Emit structured JSON for machine consumption. Used by the smking
+     * install wizard's `run_doctor` MCP tool to parse check results
+     * directly rather than scraping the pretty-printed output.
+     *
+     * Stable shape (do not break without bumping wizard version): each
+     * check keeps the same {status, label, detail} keys the pretty render
+     * already uses, plus a summary block with counts and an `ok` bool so
+     * the agent can short-circuit on the boolean.
+     *
+     * @param  list<array{status: 'pass'|'fail'|'info', label: string, detail: string}>  $checks
+     */
+    private function renderJson(array $checks, bool $hasFailure): void
+    {
+        $summary = [
+            'passed' => count(array_filter($checks, fn (array $c): bool => $c['status'] === 'pass')),
+            'failed' => count(array_filter($checks, fn (array $c): bool => $c['status'] === 'fail')),
+            'info' => count(array_filter($checks, fn (array $c): bool => $c['status'] === 'info')),
+            'ok' => ! $hasFailure,
+        ];
+
+        $payload = [
+            'checks' => $checks,
+            'summary' => $summary,
+        ];
+
+        $json = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if ($json === false) {
+            // Defensive fallback: invalid UTF-8 in a customer's exception
+            // message could trip json_encode. Emit a minimal valid payload
+            // so the wizard agent gets something parseable rather than
+            // silent empty stdout.
+            $json = '{"checks":[],"summary":{"passed":0,"failed":0,"info":0,"ok":false},"error":"json_encode_failed"}';
+        }
+
+        $this->output->writeln($json);
     }
 
     /**

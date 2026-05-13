@@ -250,4 +250,71 @@ class DoctorCommandTest extends TestCase
         $exit = $this->artisan('smking:doctor')->run();
         $this->assertSame(1, $exit);
     }
+
+    /**
+     * v0.10.1: `--json` flag emits structured output for @smking/wizard.
+     * Stable contract: { checks: [...], summary: { passed, failed, info, ok } }.
+     * Shape break here = breaks the wizard's run_doctor parser.
+     */
+    public function test_json_flag_emits_valid_parseable_output_with_summary_ok_true_when_all_pass(): void
+    {
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response(['error' => 'missing key'], 400),
+            'api.test/api/v1/public/sitemap.xml*' => Http::response('<urlset/>', 200),
+            'api.test/api/v1/public/robots.txt*' => Http::response("User-agent: *\nAllow: /\n", 200),
+            'api.test/api/v1/public/llms-txt*' => Http::response("# index\n", 200),
+        ]);
+
+        $output = new \Symfony\Component\Console\Output\BufferedOutput();
+        $exit = \Illuminate\Support\Facades\Artisan::call(
+            'smking:doctor',
+            ['--path' => '/', '--json' => true],
+            $output,
+        );
+        $stdout = trim($output->fetch());
+
+        $this->assertSame(0, $exit);
+
+        $payload = json_decode($stdout, true);
+        $this->assertIsArray($payload, 'doctor --json must emit valid JSON');
+        $this->assertArrayHasKey('checks', $payload);
+        $this->assertArrayHasKey('summary', $payload);
+        $this->assertTrue($payload['summary']['ok'], 'summary.ok should be true when no checks failed');
+        $this->assertSame(0, $payload['summary']['failed']);
+        $this->assertGreaterThan(0, $payload['summary']['passed']);
+
+        // Each check must have the {status, label, detail} shape the wizard
+        // depends on. Catching schema drift here protects the wizard contract.
+        foreach ($payload['checks'] as $check) {
+            $this->assertArrayHasKey('status', $check);
+            $this->assertArrayHasKey('label', $check);
+            $this->assertArrayHasKey('detail', $check);
+            $this->assertContains($check['status'], ['pass', 'fail', 'info']);
+        }
+    }
+
+    public function test_json_flag_returns_summary_ok_false_when_a_check_fails(): void
+    {
+        // Sabotage api_key so checkApiKey fails — easiest deterministic fail.
+        config()->set('smking.api_key', null);
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response([], 400),
+            'api.test/api/v1/public/sitemap.xml*' => Http::response('', 200),
+            'api.test/api/v1/public/robots.txt*' => Http::response('', 200),
+            'api.test/api/v1/public/llms-txt*' => Http::response('', 200),
+        ]);
+
+        $output = new \Symfony\Component\Console\Output\BufferedOutput();
+        $exit = \Illuminate\Support\Facades\Artisan::call(
+            'smking:doctor',
+            ['--json' => true],
+            $output,
+        );
+        $payload = json_decode(trim($output->fetch()), true);
+
+        $this->assertSame(1, $exit);
+        $this->assertIsArray($payload);
+        $this->assertFalse($payload['summary']['ok']);
+        $this->assertGreaterThan(0, $payload['summary']['failed']);
+    }
 }
