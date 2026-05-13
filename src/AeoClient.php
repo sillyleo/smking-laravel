@@ -181,9 +181,18 @@ class AeoClient
     ): ?string {
         $writeResult = function (array $result) use ($repository, $cacheKey, $cacheConfig, $ttl): void {
             if ($result['body'] === null) {
-                $writeTtl = $result['status'] === AeoResponse::STATUS_SERVER_ERROR
-                    ? (int) ($cacheConfig['server_error_ttl'] ?? 86400)
-                    : min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900));
+                if ($result['status'] === AeoResponse::STATUS_SERVER_ERROR) {
+                    // v0.10.0: adaptive backoff — first failure caches for
+                    // 30s (auto-retry catches install typos / firewall
+                    // configuration in seconds, not 24 hours). Each
+                    // subsequent failure escalates until we reach
+                    // server_error_ttl (default 24hr) for steady-state
+                    // outage protection.
+                    $failCount = $this->bumpFailureCount($repository, $cacheKey);
+                    $writeTtl = $this->backoffTtlForFailures($cacheConfig, $failCount);
+                } else {
+                    $writeTtl = min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900));
+                }
                 $repository->put($cacheKey, false, $writeTtl);
 
                 // v0.7.0 round-4: markdown 5xx / transport failure trips
@@ -197,6 +206,11 @@ class AeoClient
                 return;
             }
             $repository->put($cacheKey, $result['body'], $ttl);
+
+            // v0.10.0: success clears the failure counter so the next
+            // outage starts at the 30s backoff step, not whatever step
+            // a long-ago failure left behind.
+            $this->resetFailureCount($repository, $cacheKey);
 
             // v0.7.1: markdown half-open success — log close event when
             // recovering from a previous markdown outage.
@@ -394,11 +408,14 @@ class AeoClient
         // and does the upstream fetch + cache write; others fail open so
         // worker pool stays healthy.
         return $this->singleFlight($repository, $cacheKey, $resolver, function (AeoResponse $response) use ($repository, $cacheKey, $cacheConfig, $ttl): void {
-            // v0.7.0 round-3 four-tier TTL:
+            // Four-tier TTL with adaptive server_error backoff (v0.10.0):
             //   ready        → full ttl (default 1hr)
             //   not_found    → not_found_ttl (default 15min)
-            //   server_error → server_error_ttl (default 24hr) — kills retry
-            //                  loop against a dead upstream
+            //   server_error → 30s → 5min → 30min → server_error_ttl (default 24hr)
+            //                  Escalates per consecutive failure so install
+            //                  typos / firewall issues auto-recover in
+            //                  seconds, while a real outage still gets the
+            //                  full 24hr protection by failure #4.
             //   pending      → pending_ttl (default 15s) — was "never cache"
             //                  but a hot URL launched mid-crawl would
             //                  otherwise poll upstream continuously until
@@ -406,7 +423,10 @@ class AeoClient
             $writeTtl = match ($response->status) {
                 AeoResponse::STATUS_READY => $ttl,
                 AeoResponse::STATUS_NOT_FOUND => min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900)),
-                AeoResponse::STATUS_SERVER_ERROR => (int) ($cacheConfig['server_error_ttl'] ?? 86400),
+                AeoResponse::STATUS_SERVER_ERROR => $this->backoffTtlForFailures(
+                    $cacheConfig,
+                    $this->bumpFailureCount($repository, $cacheKey),
+                ),
                 AeoResponse::STATUS_PENDING => (int) ($cacheConfig['pending_ttl'] ?? 15),
                 default => $ttl,
             };
@@ -422,8 +442,11 @@ class AeoClient
             // v0.7.1: half-open success → emit "circuit closed" log if
             // we just recovered from an outage. Only checked on a ready
             // response; tombstone is atomic-pulled so concurrent half-
-            // open requests log at most once.
+            // open requests log at most once. v0.10.0: also clears the
+            // failure counter so the next outage starts at 30s, not at
+            // whatever stage a long-ago failure left it.
             if ($response->status === AeoResponse::STATUS_READY) {
+                $this->resetFailureCount($repository, $cacheKey);
                 $this->maybeLogCircuitClosed($repository, 'aeo');
             }
         });
@@ -546,6 +569,87 @@ class AeoClient
     private function circuitTombstoneKey(string $surface): string
     {
         return $this->circuitKey($surface).':tombstone';
+    }
+
+    /**
+     * v0.10.0: adaptive backoff TTL for `server_error` cache entries. Lookup
+     * is keyed by the **consecutive failure count for this specific cache
+     * key** (counter at {@see failureCountKey()}), so each path's backoff
+     * progresses independently and `cache:purge` resets the counter along
+     * with the cache value.
+     *
+     * Default steps (configurable via `smking.cache.server_error_backoff`):
+     *   1st failure → 30s    — auto-recovers from install typos / temporary
+     *                          DNS hiccups in seconds
+     *   2nd failure → 5 min  — defends against tight-loop retry while still
+     *                          surfacing within a coffee break
+     *   3rd failure → 30 min — gives operator a window to react
+     *   4th+        → fallback to `server_error_ttl` (default 24hr) for
+     *                          steady-state outage protection
+     *
+     * Set `server_error_backoff => []` or `false` to disable backoff and
+     * use the pre-v0.10.0 flat-24hr behavior.
+     *
+     * @param  array<string, mixed>  $cacheConfig
+     */
+    private function backoffTtlForFailures(array $cacheConfig, int $failureCount): int
+    {
+        $fallbackTtl = (int) ($cacheConfig['server_error_ttl'] ?? 86400);
+        $steps = $cacheConfig['server_error_backoff'] ?? [30, 300, 1800];
+
+        if ($steps === false || ! is_array($steps) || $steps === []) {
+            return $fallbackTtl;
+        }
+
+        // 1-indexed: failure #1 reads $steps[0]. Out-of-range fails over to
+        // fallback so config-supplied steps shorter than 4 still behave.
+        $index = max(0, $failureCount - 1);
+        if ($index >= count($steps)) {
+            return $fallbackTtl;
+        }
+
+        $ttl = $steps[$index];
+        return is_numeric($ttl) ? (int) $ttl : $fallbackTtl;
+    }
+
+    /**
+     * Counter key for a given cache key. Suffixing the cache key directly
+     * (rather than introducing a separate prefix) means namespace rotation
+     * (`api_key` / `base_url` change) and `cache:purge <path>` automatically
+     * invalidate the counter alongside the cached value — no separate
+     * cleanup paths to keep in sync.
+     */
+    private function failureCountKey(string $cacheKey): string
+    {
+        return $cacheKey.':fc';
+    }
+
+    /**
+     * Increment and persist the consecutive-failure counter for a cache key.
+     * Returns the new count.
+     *
+     * Counter TTL is 30 days — long enough to outlast any realistic outage
+     * window but bounded so a permanently-broken key (deleted site, stale
+     * URL never visited again) doesn't accumulate counter state forever.
+     */
+    private function bumpFailureCount(\Illuminate\Contracts\Cache\Repository $repository, string $cacheKey): int
+    {
+        $key = $this->failureCountKey($cacheKey);
+        $current = $repository->get($key);
+        $next = (is_int($current) ? $current : 0) + 1;
+        $repository->put($key, $next, 30 * 86400);
+
+        return $next;
+    }
+
+    /**
+     * Clear the consecutive-failure counter for a cache key. Called on
+     * `ready` responses so the next outage starts at the 30s backoff step
+     * instead of whatever step a long-ago failure left behind.
+     */
+    private function resetFailureCount(\Illuminate\Contracts\Cache\Repository $repository, string $cacheKey): void
+    {
+        $repository->forget($this->failureCountKey($cacheKey));
     }
 
     /**

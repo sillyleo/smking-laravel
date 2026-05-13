@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.10.0 — Adaptive backoff for `server_error` cache: install typos auto-recover in 30s, not 24hr
+
+Surfaced by a customer install (sleepytofu.com) that 卡在 `X-Smking-Status: server_error` for two days despite the operator fixing the underlying configuration mid-way. Diagnosis: the SDK had cached the very first failed upstream call for the full v0.7.0 `server_error_ttl` (24hr) and the circuit breaker had tripped on top of that — even after the operator fixed `SMKING_BASE_URL` and restarted PHP-FPM, no path would re-attempt the upstream until the customer ran `smking:cache:purge` manually.
+
+The flat 24hr TTL was sized for **steady-state outage** (a long-running smking SaaS outage on a million-PV customer site — without the long cache, every request would consume a connect+read timeout and saturate the FPM pool). But that same TTL turns **install-time mistakes** into a 24-hour-feedback loop: typo your base URL, get cached for 24hr; firewall blocks outbound, get cached for 24hr; forget to clear `config:cache`, get cached for 24hr.
+
+### feat: per-key adaptive backoff TTL for `server_error`
+
+Replaces the flat `server_error_ttl` with a configurable step ladder, keyed by the consecutive-failure count for that specific cache key:
+
+```php
+'server_error_backoff' => [30, 300, 1800],  // 30s → 5min → 30min
+'server_error_ttl'     => 86400,            // fallback after step exhaustion
+```
+
+| Failure # | Cache TTL | Recovers from |
+|-----------|-----------|---------------|
+| 1st       | 30s       | Install typos, transient DNS hiccups, config-cache staleness |
+| 2nd       | 5 min     | Coffee-break-scale fix windows |
+| 3rd       | 30 min    | Operator-response windows |
+| 4th+      | 24hr (fallback) | Steady-state SaaS outage protection |
+
+Each cache key has its own failure counter (`<cache_key>:fc`, 30-day TTL) so per-path backoff progresses independently. A successful `ready` response resets the counter — the next outage starts fresh at 30s, not at whatever step a long-ago failure left it.
+
+### Where it matters most
+
+- **First-time installs**: the typical 30-second feedback loop dramatically shortens the configure → test → fix cycle. Previously every wrong-base-URL save cost a `php artisan smking:cache:purge` + restart; now it just costs waiting through one network ping.
+- **Operator-fix windows**: ops fixes a firewall rule, hits the page, sees `ready` within the next minute instead of 24hr later.
+- **Steady-state outages still protected**: by failure #4 the SDK has spent ~30+5+30 = 65 minutes of escalating cache, well past any transient-network window. From there the full `server_error_ttl` (default 24hr) kicks in and the original FPM-saturation prevention is intact.
+
+### Counter reset paths
+
+The failure counter clears under three conditions:
+
+- `ready` upstream response (success path).
+- `php artisan smking:cache:purge <path>` (operator-initiated retry).
+- `cacheNamespace()` rotation — changing `SMKING_API_KEY` or `SMKING_BASE_URL` invalidates the counter alongside every other cache entry (the counter shares the same key suffix scheme).
+
+### Opt-out: disable adaptive backoff
+
+Set `server_error_backoff => []` (or `false`) in `config/smking.php` to keep the pre-v0.10.0 flat-24hr behavior. Useful for high-PV sites that prefer not retrying upstream every 30 seconds during a confirmed long outage — though circuit breaker (default-on since v0.7.0) already provides surface-level short-circuiting for that case.
+
+### Composer constraint reminder
+
+Upgrading from `^0.9` requires bumping your `composer.json` constraint to `^0.10` — Composer's caret rule treats minor bumps on `0.x` as breaking. Once bumped, future `0.10.x` patches install automatically.
+
 ## v0.9.0 — Path-takeover: middleware auto-serves `/sitemap.xml`, `/robots.txt`, `/llms.txt`
 
 Customers with broken or missing SEO/AEO infrastructure files (no sitemap at all, missing `robots.txt`, no `llms.txt` for AI agents) had no way to benefit from smking without manually adding routes or running CLI commands. Agent-readiness audits kept reporting these as fail even though smking had complete page inventory data (via `site_pages`) and ready content (via `product_content`).
