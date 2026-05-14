@@ -103,6 +103,63 @@ class CmsClientTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_propagates_seo_block_to_CmsPage(): void
+    {
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'page' => [
+                    'slug' => 'hello',
+                    'title' => 'Hello world',
+                    'body' => ['type' => 'doc', 'content' => []],
+                    'publishedAt' => '2026-05-14T10:00:00Z',
+                ],
+                'seo' => [
+                    'title' => 'Hello world | SmKing',
+                    'metaDescription' => 'A friendly hello article.',
+                    'ogTitle' => 'Say hi',
+                    'ogDescription' => 'Friendly intro for sharing',
+                    'ogImageUrl' => 'https://imagedelivery.net/x/cover/public',
+                    'canonicalUrl' => 'https://example.com/hello',
+                ],
+            ], 200),
+        ]);
+
+        $page = $this->app->make(CmsClient::class)->forSlug('hello');
+
+        $this->assertTrue($page->isReady());
+        $this->assertIsArray($page->seo);
+        $this->assertSame('Hello world | SmKing', $page->seo['title']);
+        $this->assertSame('A friendly hello article.', $page->seo['metaDescription']);
+        $this->assertSame('Say hi', $page->seo['ogTitle']);
+        $this->assertSame(
+            'https://imagedelivery.net/x/cover/public',
+            $page->seo['ogImageUrl'],
+        );
+        $this->assertSame('https://example.com/hello', $page->seo['canonicalUrl']);
+    }
+
+    public function test_missing_seo_block_resolves_to_null(): void
+    {
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'page' => [
+                    'slug' => 'hello',
+                    'title' => '',
+                    'body' => ['type' => 'doc'],
+                    'publishedAt' => null,
+                ],
+                // no seo key
+            ], 200),
+        ]);
+
+        $page = $this->app->make(CmsClient::class)->forSlug('hello');
+
+        $this->assertTrue($page->isReady());
+        $this->assertNull($page->seo);
+    }
+
     public function test_renders_gallery_node_via_php_extension(): void
     {
         Http::fake([

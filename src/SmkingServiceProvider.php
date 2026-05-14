@@ -13,6 +13,7 @@ use Smking\Laravel\Console\CachePurgeCommand;
 use Smking\Laravel\Console\CircuitStatusCommand;
 use Smking\Laravel\Console\DoctorCommand;
 use Smking\Laravel\Console\PublishRobotsTxtCommand;
+use Smking\Laravel\Http\Controllers\WebhookController;
 use Smking\Laravel\Http\Middleware\InjectAeo;
 use Smking\Laravel\Tiptap\EditorFactory;
 use Smking\Laravel\View\Components\Aeo as AeoComponent;
@@ -77,6 +78,7 @@ class SmkingServiceProvider extends ServiceProvider
         ]);
 
         $this->registerMiddleware();
+        $this->registerRoutes();
 
         if ($this->app->runningInConsole()) {
             $this->commands([
@@ -86,6 +88,37 @@ class SmkingServiceProvider extends ServiceProvider
                 PublishRobotsTxtCommand::class,
             ]);
         }
+    }
+
+    /**
+     * Auto-mount the inbound webhook receiver at /api/smking/webhook.
+     * Customer pastes that URL into the SmKing dashboard's webhook field;
+     * SaaS POSTs publish events here, we HMAC-verify, evict CmsClient
+     * cache. Single endpoint serves all future event types — branched
+     * inside the controller — so the wire interface stays small.
+     *
+     * Disable per config (`smking.webhook.enabled = false`) for customers
+     * who'd rather mount it manually on a custom path / domain.
+     */
+    private function registerRoutes(): void
+    {
+        $enabled = (bool) ($this->app['config']->get('smking.webhook.enabled', true));
+        if (! $enabled) {
+            return;
+        }
+
+        if (! method_exists($this->app, 'routesAreCached') || $this->app->routesAreCached()) {
+            // Production route cache present — customer must `route:clear`
+            // for the smking webhook route to land. Skip silently here so
+            // we don't crash other request types; doctor command surfaces
+            // the missing route when ran.
+            return;
+        }
+
+        \Illuminate\Support\Facades\Route::post(
+            $this->app['config']->get('smking.webhook.path', '/api/smking/webhook'),
+            WebhookController::class,
+        )->name('smking.webhook')->withoutMiddleware(['web', 'auth']);
     }
 
     private function registerMiddleware(): void

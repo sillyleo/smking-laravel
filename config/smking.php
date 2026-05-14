@@ -29,6 +29,31 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Webhook (v0.11.0+ — push-invalidate customer cache on SaaS publish)
+    |--------------------------------------------------------------------------
+    |
+    | SmKing SaaS POSTs a signed payload to `/api/smking/webhook` (the route
+    | auto-mounts in this package) whenever a CMS page is published. The
+    | handler verifies the HMAC sig against `webhook_secret` then evicts
+    | the matching CmsClient cache entry — so customer visitors see the
+    | new version on the next request instead of waiting up to 5min for
+    | the cache TTL.
+    |
+    | Grab the secret from your smking dashboard's site settings. If
+    | unset, the webhook handler returns 503 — set both these to enable.
+    | If you'd rather not run the webhook (e.g. air-gapped deploy with
+    | no inbound HTTP from SaaS allowed), set `webhook.enabled = false`
+    | and rely on TTL-based cache expiry (5min default).
+    |
+    */
+    'webhook_secret' => env('SMKING_WEBHOOK_SECRET'),
+    'webhook' => [
+        'enabled' => env('SMKING_WEBHOOK_ENABLED', true),
+        'path' => env('SMKING_WEBHOOK_PATH', '/api/smking/webhook'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Auto Injection
     |--------------------------------------------------------------------------
     |

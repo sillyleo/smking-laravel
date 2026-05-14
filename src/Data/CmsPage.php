@@ -24,12 +24,20 @@ final class CmsPage
     public const STATUS_NOT_FOUND = 'not_found';
     public const STATUS_SERVER_ERROR = 'server_error';
 
+    /**
+     * @param  ?array{title: ?string, metaDescription: ?string, ogTitle: ?string, ogDescription: ?string, ogImageUrl: ?string, canonicalUrl: ?string}  $seo
+     *   v0.11.0+ — server-resolved SEO meta for the published page.
+     *   Same shape as AeoResponse->seo (SeoMeta), so the customer can
+     *   reuse the same Blade <x-smking-meta> emitter for both AEO product
+     *   pages and CMS body pages without branching.
+     */
     public function __construct(
         public readonly string $status,
         public readonly ?string $slug = null,
         public readonly ?string $title = null,
         public readonly ?string $bodyHtml = null,
         public readonly ?string $publishedAt = null,
+        public readonly ?array $seo = null,
     ) {
     }
 
@@ -47,6 +55,19 @@ final class CmsPage
             return new self(status: $status);
         }
 
+        $seo = null;
+        $seoRaw = $payload['seo'] ?? null;
+        if (is_array($seoRaw)) {
+            $seo = [
+                'title' => isset($seoRaw['title']) && is_string($seoRaw['title']) ? $seoRaw['title'] : null,
+                'metaDescription' => isset($seoRaw['metaDescription']) && is_string($seoRaw['metaDescription']) ? $seoRaw['metaDescription'] : null,
+                'ogTitle' => isset($seoRaw['ogTitle']) && is_string($seoRaw['ogTitle']) ? $seoRaw['ogTitle'] : null,
+                'ogDescription' => isset($seoRaw['ogDescription']) && is_string($seoRaw['ogDescription']) ? $seoRaw['ogDescription'] : null,
+                'ogImageUrl' => isset($seoRaw['ogImageUrl']) && is_string($seoRaw['ogImageUrl']) ? $seoRaw['ogImageUrl'] : null,
+                'canonicalUrl' => isset($seoRaw['canonicalUrl']) && is_string($seoRaw['canonicalUrl']) ? $seoRaw['canonicalUrl'] : null,
+            ];
+        }
+
         return new self(
             status: self::STATUS_READY,
             slug: isset($page['slug']) ? (string) $page['slug'] : null,
@@ -55,6 +76,7 @@ final class CmsPage
             publishedAt: isset($page['publishedAt']) && is_string($page['publishedAt'])
                 ? $page['publishedAt']
                 : null,
+            seo: $seo,
         );
     }
 
@@ -89,6 +111,7 @@ final class CmsPage
             'title' => $this->title,
             'bodyHtml' => $this->bodyHtml,
             'publishedAt' => $this->publishedAt,
+            'seo' => $this->seo,
         ];
     }
 }
