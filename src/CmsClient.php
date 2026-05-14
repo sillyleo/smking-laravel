@@ -127,12 +127,15 @@ class CmsClient
         $page = $resolver();
 
         // Successful renders cache for full ttl; failures cache short
-        // (not_found_ttl) so a brief upstream blip doesn't lock out for
-        // 5 min. Mirrors AeoClient's tiered TTL scheme, simplified.
+        // so a transient cold-start timeout doesn't lock out for the full
+        // 5min cache window. CMS surface uses its own short TTLs (15s
+        // default) instead of inheriting AEO's 60s — CMS is cold-path,
+        // failures are usually first-hit cold start that succeeds on the
+        // very next attempt.
         $writeTtl = match ($page->status) {
             CmsPage::STATUS_READY => $ttl,
-            CmsPage::STATUS_NOT_FOUND => min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 60)),
-            CmsPage::STATUS_SERVER_ERROR => min($ttl, (int) ($cacheConfig['server_error_ttl'] ?? 60)),
+            CmsPage::STATUS_NOT_FOUND => min($ttl, (int) ($cacheConfig['cms_not_found_ttl'] ?? 15)),
+            CmsPage::STATUS_SERVER_ERROR => min($ttl, (int) ($cacheConfig['cms_server_error_ttl'] ?? 15)),
             default => $ttl,
         };
         $repository->put($cacheKey, $page, $writeTtl);
@@ -157,16 +160,32 @@ class CmsClient
         return ((string) $this->baseUrl()).$path;
     }
 
+    /**
+     * CMS surface uses generous timeout defaults vs AEO. Reasoning:
+     * AEO is auto-injected on every page load → Vercel functions stay
+     * warm → 1.5s read covers steady-state. CMS fetch is rare (only
+     * when a customer page renders the <x-smking-cms> component, and
+     * we cache for 5 min) → Vercel cold starts dominate the first
+     * call per cache cycle, easily 3-5s. A 1.5s timeout here means
+     * every cache miss times out → server_error → user sees blank.
+     *
+     * Defaults: 3s connect / 10s read. Override per-env:
+     *   SMKING_CMS_CONNECT_TIMEOUT, SMKING_CMS_TIMEOUT
+     *
+     * Self-hosted SaaS customers running their own Next.js with
+     * always-on workers can drop these back to AEO levels for tighter
+     * latency budgets.
+     */
     private function connectTimeout(): float
     {
-        $value = $this->config->get('smking.connect_timeout', 1.0);
-        return is_numeric($value) ? (float) $value : 1.0;
+        $value = $this->config->get('smking.cms_connect_timeout', 3.0);
+        return is_numeric($value) ? (float) $value : 3.0;
     }
 
     private function readTimeout(): float
     {
-        $value = $this->config->get('smking.timeout', 1.5);
-        return is_numeric($value) ? (float) $value : 1.5;
+        $value = $this->config->get('smking.cms_timeout', 10.0);
+        return is_numeric($value) ? (float) $value : 10.0;
     }
 
     /**
