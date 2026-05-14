@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.10.2 — Fix `TypeError: timeout() must be of type int, float given` on Laravel 11+
+
+Surfaced by sleepytofu.com running `php artisan smking:doctor` post-install on Laravel 11 / PHP 8.4. The doctor's path-status probe crashed with:
+
+> `Illuminate\Http\Client\PendingRequest::timeout(): Argument #1 ($seconds) must be of type int, float given, called in vendor/smking/laravel/src/AeoClient.php on line 266`
+
+### Root cause
+
+Laravel 11 tightened the HTTP client signatures to strict ints:
+
+```php
+// Laravel 10 (loose)        // Laravel 11+ (strict)
+->timeout($seconds)           ->timeout(int $seconds)
+->connectTimeout($seconds)    ->connectTimeout(int $seconds)
+```
+
+Our `readTimeout(): float` / `connectTimeout(): float` returned `1.5` / `1.0` from config (intentionally float so operators could set sub-second precision). On Laravel 11+, passing those floats hard-fails with a `TypeError` — and because the throw escapes the SDK's catch block (it's a PHP type error, not an `\Exception`), the host page sees a 500.
+
+### Fix
+
+New private `httpTimeoutInt(float $seconds): int` helper that ceils the float and clamps to a minimum of 1 second (so a typo'd `0`/negative config can't disable timeouts entirely). All three `AeoClient` HTTP call sites now wrap timeout config through it. Lock-TTL math (the other consumer of `readTimeout()` / `connectTimeout()`) keeps using the raw float for precision — only the HTTP boundary needs the int cast.
+
+| Config value | Effective timeout (post-v0.10.2) |
+|---|---|
+| `1.5` (default) | 2 seconds |
+| `0.5` | 1 second |
+| `2.1` | 3 seconds |
+| `0` / negative | 1 second (clamped) |
+| `5` | 5 seconds (unchanged) |
+
+The ceil bias means timeouts never become *shorter* than what the operator configured — a 1.5s setting becomes 2s rather than 1s. For operators on Laravel 10 (where sub-second precision worked), the behaviour change is minor and only on configs that used decimals.
+
+### Tests
+
+Two new tests in `AeoClientTest`:
+- `test_http_timeout_int_ceils_floats_to_int` — reflection-based, directly exercises the helper math because `Http::fake()` swaps the underlying client and bypasses the int type check.
+- `test_default_float_config_does_not_crash_aeo_lookup` — end-to-end regression that the default config values (`1.0` / `1.5`) reach the HTTP `post()` call without a `TypeError`.
+
+### What customers see
+
+Upgrade `^0.10.0` → `^0.10.2` resolves the doctor crash and any 500 on the host page caused by middleware AEO lookups timing out. The crash was visible specifically when running `smking:doctor` because of its third check ("Path …/smking-doctor status"), but the same code path runs on every request through the middleware — any Laravel 11+ site that successfully installed v0.10.0 / v0.10.1 was returning 500s on AEO-injected pages.
+
 ## v0.10.1 — `smking:doctor --json` for machine-readable output
 
 Adds a `--json` flag to `php artisan smking:doctor` that emits the check results as structured JSON instead of the pretty-printed report. Designed for tooling that needs to parse doctor results programmatically — specifically the new `@smking/wizard` install agent, which uses it to decide between "all green → done" and "failure → retry / file ticket" without scraping ANSI-coloured terminal output.

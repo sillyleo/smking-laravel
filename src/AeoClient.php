@@ -84,8 +84,8 @@ class AeoClient
 
         try {
             $response = $this->http
-                ->connectTimeout($this->connectTimeout())
-                ->timeout($this->readTimeout())
+                ->connectTimeout($this->httpTimeoutInt($this->connectTimeout()))
+                ->timeout($this->httpTimeoutInt($this->readTimeout()))
                 ->withHeaders(['Accept' => 'text/markdown'])
                 ->get($this->endpoint('/api/v1/public/md'), [
                     'key' => $apiKey,
@@ -276,8 +276,8 @@ class AeoClient
 
         try {
             $response = $this->http
-                ->connectTimeout($this->connectTimeout())
-                ->timeout($this->readTimeout())
+                ->connectTimeout($this->httpTimeoutInt($this->connectTimeout()))
+                ->timeout($this->httpTimeoutInt($this->readTimeout()))
                 ->acceptJson()
                 ->asJson()
                 ->post($this->endpoint('/api/v1/public/aeo'), $payload);
@@ -341,7 +341,11 @@ class AeoClient
 
     /**
      * Resolve `cache.connect_timeout` from config; default 1.0s. Floats
-     * accepted because Laravel's HTTP client supports sub-second precision.
+     * accepted because Laravel's HTTP client used to support sub-second
+     * precision. Internal callers (lock TTL math) still want the float
+     * for precision; HTTP-client callers must cast via `httpTimeoutInt()`
+     * because Laravel 11+ tightened `connectTimeout(int $seconds)` and
+     * `timeout(int $seconds)` to strict int types.
      */
     private function connectTimeout(): float
     {
@@ -352,13 +356,31 @@ class AeoClient
 
     /**
      * Resolve `smking.timeout` (read timeout) from config; default 1.5s
-     * since v0.7.0 (was 3s). Floats accepted.
+     * since v0.7.0 (was 3s). Floats accepted — see connectTimeout() docs
+     * for the HTTP-client-int requirement on Laravel 11+.
      */
     private function readTimeout(): float
     {
         $value = $this->config->get('smking.timeout', 1.5);
 
         return is_numeric($value) ? (float) $value : 1.5;
+    }
+
+    /**
+     * v0.10.2: Laravel 11+ tightened HTTP client signatures to
+     * `timeout(int $seconds)` and `connectTimeout(int $seconds)`.
+     * Passing the raw float from config (1.5) crashes the SDK with a
+     * TypeError, then takes down the host page through the middleware.
+     * Surfaced by sleepytofu.com running `smking:doctor` post-install.
+     *
+     * We ceil rather than round/floor: a config-set 1.5s timeout becomes
+     * 2s effective, which never makes the timeout *shorter* than what
+     * the operator asked for. `max(1, …)` floors negative / zero config
+     * values to 1s so a typo can't disable timeouts entirely.
+     */
+    private function httpTimeoutInt(float $seconds): int
+    {
+        return max(1, (int) ceil($seconds));
     }
 
     /**
@@ -773,8 +795,8 @@ class AeoClient
 
         try {
             $response = $this->http
-                ->connectTimeout($this->connectTimeout())
-                ->timeout($this->readTimeout())
+                ->connectTimeout($this->httpTimeoutInt($this->connectTimeout()))
+                ->timeout($this->httpTimeoutInt($this->readTimeout()))
                 ->get($this->endpoint($endpoint), ['key' => $apiKey]);
         } catch (Throwable $e) {
             $this->logger?->warning('smking: takeover fetch failed', [

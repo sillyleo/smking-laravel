@@ -855,4 +855,58 @@ class AeoClientTest extends TestCase
             return str_contains($request->url(), 'api.test/api/v1/public/aeo');
         });
     }
+
+    // ── httpTimeoutInt helper (v0.10.2, sleepytofu type bug) ──────
+    //
+    // Surfaced on sleepytofu.com running `smking:doctor`: Laravel 11+
+    // tightened `PendingRequest::timeout()` / `connectTimeout()` to
+    // strict `int` parameters. Passing the default float 1.5 crashed
+    // the SDK with `TypeError: timeout(): Argument #1 ($seconds) must
+    // be of type int, float given`, which then took down the host
+    // page through the middleware.
+    //
+    // Reflection test because Http::fake() swaps the underlying client
+    // and bypasses the int type check — only direct invocation of the
+    // helper exercises the ceil/clamp contract.
+
+    public function test_http_timeout_int_ceils_floats_to_int(): void
+    {
+        $client = $this->app->make(AeoClient::class);
+        $reflection = new \ReflectionClass(AeoClient::class);
+        $method = $reflection->getMethod('httpTimeoutInt');
+        $method->setAccessible(true);
+
+        // Default config values that were crashing pre-v0.10.2
+        $this->assertSame(2, $method->invoke($client, 1.5));
+        $this->assertSame(1, $method->invoke($client, 0.5));
+        $this->assertSame(1, $method->invoke($client, 1.0));
+        $this->assertSame(3, $method->invoke($client, 2.1));
+
+        // Clamp: 0 / negative configs must not yield 0-second timeouts
+        // (would disable HTTP timeout entirely — could hang FPM
+        // worker indefinitely on a slow upstream).
+        $this->assertSame(1, $method->invoke($client, 0.0));
+        $this->assertSame(1, $method->invoke($client, -1.0));
+
+        // Plain int input round-trips
+        $this->assertSame(5, $method->invoke($client, 5.0));
+        $this->assertSame(30, $method->invoke($client, 30.0));
+    }
+
+    public function test_default_float_config_does_not_crash_aeo_lookup(): void
+    {
+        // Defaults are connect_timeout=1.0 and timeout=1.5 — both floats.
+        // Pre-v0.10.2 this crashed on Laravel 11+. The fake bypasses the
+        // type check but at least confirms we still reach the post() call
+        // without an earlier TypeError from building the request.
+        config()->set('smking.connect_timeout', 1.0);
+        config()->set('smking.timeout', 1.5);
+        Http::fake([
+            '*' => Http::response(['status' => 'not_found'], 404),
+        ]);
+
+        $response = $this->app->make(AeoClient::class)->forPath('/regression-test');
+
+        $this->assertSame('not_found', $response->status);
+    }
 }
