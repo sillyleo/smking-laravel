@@ -14,7 +14,9 @@ use Smking\Laravel\Console\CircuitStatusCommand;
 use Smking\Laravel\Console\DoctorCommand;
 use Smking\Laravel\Console\PublishRobotsTxtCommand;
 use Smking\Laravel\Http\Middleware\InjectAeo;
+use Smking\Laravel\Tiptap\EditorFactory;
 use Smking\Laravel\View\Components\Aeo as AeoComponent;
+use Smking\Laravel\View\Components\Cms as CmsComponent;
 use Smking\Laravel\View\Components\Meta as MetaComponent;
 
 class SmkingServiceProvider extends ServiceProvider
@@ -35,6 +37,25 @@ class SmkingServiceProvider extends ServiceProvider
         });
 
         $this->app->alias(AeoClient::class, 'smking.aeo');
+
+        // CMS — singleton EditorFactory (extension instances reused per
+        // request) + CmsClient that depends on it. Same auth / cache /
+        // logger wiring as AeoClient.
+        $this->app->singleton(EditorFactory::class);
+
+        $this->app->singleton(CmsClient::class, function ($app): CmsClient {
+            return new CmsClient(
+                http: $app->make(\Illuminate\Http\Client\Factory::class),
+                cache: $app->make(\Illuminate\Contracts\Cache\Factory::class),
+                config: $app->make(\Illuminate\Contracts\Config\Repository::class),
+                editor: $app->make(EditorFactory::class),
+                logger: $app->bound(\Psr\Log\LoggerInterface::class)
+                    ? $app->make(\Psr\Log\LoggerInterface::class)
+                    : null,
+            );
+        });
+
+        $this->app->alias(CmsClient::class, 'smking.cms');
     }
 
     public function boot(): void
@@ -51,6 +72,7 @@ class SmkingServiceProvider extends ServiceProvider
 
         $this->loadViewComponentsAs('smking', [
             'aeo' => AeoComponent::class,
+            'cms' => CmsComponent::class,
             'meta' => MetaComponent::class,
         ]);
 

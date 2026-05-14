@@ -259,6 +259,15 @@ return [
         'prefix' => 'smking:aeo:',
         'markdown_prefix' => 'smking:md:',
         'circuit_prefix' => 'smking:circuit:',
+
+        // CMS surface (v0.11.0+) — separate cache namespace from AEO so a
+        // CMS publish doesn't invalidate AEO and vice versa. Shorter TTL
+        // because CMS edits are user-driven (more frequent than the
+        // SaaS-driven AEO crawl output). cms_ttl is the ready-state TTL;
+        // failures share the AEO not_found_ttl / server_error_ttl so the
+        // cache:purge command can flush both surfaces with one knob.
+        'cms_ttl' => env('SMKING_CMS_TTL', 300),
+        'cms_prefix' => 'smking:cms:',
     ],
 
     /*
