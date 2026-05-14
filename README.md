@@ -23,6 +23,8 @@ SMKING_BASE_URL=https://your-smking-instance.example
 
 Both values are required. `SMKING_BASE_URL` must point at your smking deployment — the package ships with no default so it never silently talks to the wrong host.
 
+> **Using CMS body rendering (`<x-smking-cms />`)?** You'll also need `SMKING_WEBHOOK_SECRET` to wire CMS publish → instant cache invalidation. The value is per-site — copy it from the install prompt in your smking dashboard (or run `npx @soloworks/smking-wizard`). Without it, CMS pages still render fine but visitors see stale content for up to 5 min after each publish (TTL-based expiry).
+
 That's it — the middleware auto-registers. Every HTML GET response now picks up:
 
 - **AEO** — JSON-LD, FAQ/summary blocks (for ChatGPT, Perplexity, Google AI)
