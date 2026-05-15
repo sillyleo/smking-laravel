@@ -4,60 +4,26 @@ AI-native SEO (AEO) for Laravel. Auto-inject JSON-LD, FAQ, and AI summaries into
 
 ## Install
 
-```bash
-composer require smking/laravel
-```
+**Don't follow this README to install.** Your smking dashboard generates a per-site install prompt with the real `SMKING_API_KEY`, `SMKING_BASE_URL`, and (if you use CMS) `SMKING_WEBHOOK_SECRET` baked in, plus the exact `composer require`, `vendor:publish`, and `php artisan smking:doctor` commands. The prompt is the source of truth and stays in sync with the SDK version.
 
-Publish the config:
+Two ways to get it:
 
 ```bash
-php artisan vendor:publish --tag=smking-config
+# Option 1 — one-shot wizard (composer require + .env + doctor)
+npx @soloworks/smking-wizard
+
+# Option 2 — copy the prompt manually from your smking dashboard's
+# install panel into your editor / coding agent.
 ```
 
-Configure your `.env`:
-
-```dotenv
-SMKING_API_KEY=pk_...
-SMKING_BASE_URL=https://your-smking-instance.example
-```
-
-Both values are required. `SMKING_BASE_URL` must point at your smking deployment — the package ships with no default so it never silently talks to the wrong host.
-
-That's it — the middleware auto-registers. Every HTML GET response now picks up:
+Once `php artisan smking:doctor` is green, the middleware auto-registers and every HTML GET response picks up:
 
 - **AEO** — JSON-LD, FAQ/summary blocks (for ChatGPT, Perplexity, Google AI)
 - **SEO** — `<title>`, `og:*`, `twitter:*`, `<link rel="canonical">` (for Google snippet + social shares)
-- **Markdown for Agents** (v0.4.0+) — autonomous agents requesting `Accept: text/markdown` get a structured markdown rendition of the page (title + summary + meta + FAQ) instead of HTML. Boosts your Cloudflare Agent Readiness score.
-- **Markdown alternate Link header** (v0.5.0+) — every HTML response carries `Link: <{url}>; rel="alternate"; type="text/markdown"` so agents that don't speculatively send `Accept: text/markdown` can still discover the markdown rendition.
+- **Markdown for Agents** (v0.4.0+) — agents requesting `Accept: text/markdown` get a structured markdown rendition. Boosts your Cloudflare Agent Readiness score.
+- **Markdown alternate Link header** (v0.5.0+) — every HTML response advertises the markdown rendition via `Link: <{url}>; rel="alternate"; type="text/markdown"`.
 
 smking is the source of truth for SEO/AEO meta. Any existing `<title>`, `<meta name="description">`, `og:*`, or `<link rel="canonical">` in your layout is stripped and replaced with smking's version (v0.3.0+). To keep a tag under your control, disable it via `config('smking.inject.{tag}', false)` or render it yourself with the `<x-smking-meta />` Blade component.
-
-## Install verification
-
-After `composer require` + `vendor:publish` + `.env` setup, run:
-
-```bash
-php artisan smking:doctor
-```
-
-If everything is green, the install is complete. The doctor command runs six checks: config publish status (informational — defaults are merged automatically, publishing is only needed when you want to override `only`/`except`/`inject.*`), API key (must be set and start with `pk_`), base URL (must be set and a valid URL), middleware is in the HTTP kernel (reflection check), API reachable (POSTs an empty body to `{base_url}/api/v1/public/aeo` and expects 400/401/422 — confirms the endpoint exists rather than just any live host), and AEO status for a probe path (informational — defaults to a synthetic `__smking-doctor` so doctor runs don't pollute the audit queue with real URLs).
-
-For HTTP-level verification, hit any HTML page and look at the response headers:
-
-```bash
-curl -I http://your-app.test/
-```
-
-You should see two headers — these confirm the middleware ran, regardless of whether the smking backend has audited your URL yet:
-
-```
-X-Smking-Status: ready | pending | not_found | disabled
-X-Smking-Path: /<your-path>
-```
-
-The `data-smking-injected="1"` HTML attribute also appears on every page where middleware ran (HTML 200 GET, not in `except` patterns). Content injection (JSON-LD, FAQ, SEO meta) only appears once status reaches `ready` — which requires the URL to be reachable from the public internet so the backend can crawl it.
-
-> **Local dev with `.test` / `.local` TLDs**: the backend can't reach your machine, so status stays at `not_found` until you deploy. The middleware mark and the `X-Smking-*` headers still verify the install — `php artisan smking:doctor` is the authoritative install signal. In `local` / `testing` / `development` environments you'll also see an HTML comment near `</body>` explaining why content wasn't injected.
 
 ## Manual usage
 

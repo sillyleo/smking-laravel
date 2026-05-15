@@ -29,6 +29,31 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Webhook (v0.11.0+ — push-invalidate customer cache on SaaS publish)
+    |--------------------------------------------------------------------------
+    |
+    | SmKing SaaS POSTs a signed payload to `/api/smking/webhook` (the route
+    | auto-mounts in this package) whenever a CMS page is published. The
+    | handler verifies the HMAC sig against `webhook_secret` then evicts
+    | the matching CmsClient cache entry — so customer visitors see the
+    | new version on the next request instead of waiting up to 5min for
+    | the cache TTL.
+    |
+    | Grab the secret from your smking dashboard's site settings. If
+    | unset, the webhook handler returns 503 — set both these to enable.
+    | If you'd rather not run the webhook (e.g. air-gapped deploy with
+    | no inbound HTTP from SaaS allowed), set `webhook.enabled = false`
+    | and rely on TTL-based cache expiry (5min default).
+    |
+    */
+    'webhook_secret' => env('SMKING_WEBHOOK_SECRET'),
+    'webhook' => [
+        'enabled' => env('SMKING_WEBHOOK_ENABLED', true),
+        'path' => env('SMKING_WEBHOOK_PATH', '/api/smking/webhook'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Auto Injection
     |--------------------------------------------------------------------------
     |
@@ -259,6 +284,21 @@ return [
         'prefix' => 'smking:aeo:',
         'markdown_prefix' => 'smking:md:',
         'circuit_prefix' => 'smking:circuit:',
+
+        // CMS surface (v0.11.0+) — separate cache namespace from AEO so a
+        // CMS publish doesn't invalidate AEO and vice versa. Shorter TTL
+        // because CMS edits are user-driven (more frequent than the
+        // SaaS-driven AEO crawl output).
+        'cms_ttl' => env('SMKING_CMS_TTL', 300),
+        'cms_prefix' => 'smking:cms:',
+
+        // CMS failure TTLs are deliberately SHORTER than AEO defaults
+        // (60s for AEO). CMS is cold-path: most failures are Vercel
+        // first-hit cold-start timeouts that resolve on the very next
+        // attempt. 15s lets the SDK retry quickly without hammering
+        // upstream during a real outage.
+        'cms_not_found_ttl' => env('SMKING_CMS_NOT_FOUND_TTL', 15),
+        'cms_server_error_ttl' => env('SMKING_CMS_SERVER_ERROR_TTL', 15),
     ],
 
     /*
@@ -287,6 +327,25 @@ return [
     */
     'connect_timeout' => env('SMKING_CONNECT_TIMEOUT', 1.0),
     'timeout' => env('SMKING_HTTP_TIMEOUT', 1.5),
+
+    /*
+    |--------------------------------------------------------------------------
+    | CMS HTTP timeouts (separate from AEO since v0.11.0)
+    |--------------------------------------------------------------------------
+    |
+    | CMS surface uses generous defaults vs AEO. AEO is hot-path
+    | (auto-injected per page → Vercel functions stay warm → 1.5s read
+    | covers steady-state). CMS is cold-path (only fired when a customer
+    | page renders <x-smking-cms>, cached 5min) so Vercel cold starts
+    | dominate first-hit timing — easily 3-5s.
+    |
+    | If you've tuned Vercel keep-warm or run smking self-hosted with
+    | always-on workers, drop these back to AEO levels for tighter
+    | latency budgets.
+    |
+    */
+    'cms_connect_timeout' => env('SMKING_CMS_CONNECT_TIMEOUT', 3.0),
+    'cms_timeout' => env('SMKING_CMS_TIMEOUT', 10.0),
 
     /*
     |--------------------------------------------------------------------------
