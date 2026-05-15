@@ -15,6 +15,7 @@ use Smking\Laravel\Console\DoctorCommand;
 use Smking\Laravel\Console\PublishRobotsTxtCommand;
 use Smking\Laravel\Http\Controllers\WebhookController;
 use Smking\Laravel\Http\Middleware\InjectAeo;
+use Smking\Laravel\Http\Middleware\TrackCrawlerHit;
 use Smking\Laravel\Tiptap\EditorFactory;
 use Smking\Laravel\View\Components\Aeo as AeoComponent;
 use Smking\Laravel\View\Components\Cms as CmsComponent;
@@ -136,21 +137,34 @@ class SmkingServiceProvider extends ServiceProvider
         // its own middleware stack, so this has no runtime side-effect on
         // console commands. The win: `php artisan smking:doctor` can now
         // reflect into the array and confirm InjectAeo is wired up.
-        if ($this->isMiddlewareRegistered($kernel)) {
+        $stack = $this->loadMiddlewareStack($kernel);
+        if ($stack === null) {
             return;
         }
 
-        $kernel->pushMiddleware(InjectAeo::class);
+        if (! in_array(InjectAeo::class, $stack, true)) {
+            $kernel->pushMiddleware(InjectAeo::class);
+        }
+
+        // TrackCrawlerHit (v0.12+) — terminable middleware, fires AFTER the
+        // response is sent. Safe to push alongside InjectAeo because it's
+        // pure read-only (never touches the response body).
+        if (! in_array(TrackCrawlerHit::class, $stack, true)) {
+            $kernel->pushMiddleware(TrackCrawlerHit::class);
+        }
     }
 
     /**
-     * Idempotency check — avoid double-pushing when service providers boot
-     * twice (rare but possible in test harnesses or custom dev setups).
+     * Idempotency helper — read the kernel's middleware array via reflection
+     * so we can skip pushing what's already wired up (test harnesses /
+     * double-boot scenarios). Returns null when reflection isn't possible.
+     *
+     * @return list<class-string>|null
      */
-    private function isMiddlewareRegistered(HttpKernel $kernel): bool
+    private function loadMiddlewareStack(HttpKernel $kernel): ?array
     {
         if (! $kernel instanceof FoundationKernel) {
-            return false;
+            return null;
         }
 
         try {
@@ -159,10 +173,10 @@ class SmkingServiceProvider extends ServiceProvider
             $property->setAccessible(true);
             /** @var array<int, class-string> $middleware */
             $middleware = (array) $property->getValue($kernel);
-        } catch (ReflectionException) {
-            return false;
-        }
 
-        return in_array(InjectAeo::class, $middleware, true);
+            return array_values($middleware);
+        } catch (ReflectionException) {
+            return null;
+        }
     }
 }
