@@ -9,33 +9,38 @@ use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Psr\Log\LoggerInterface;
-use Smking\Laravel\CmsClient;
 
 /**
- * Receives SmKing publish webhooks at `/api/smking/webhook` (auto-mounted
- * by SmkingServiceProvider). HMAC-verifies the request against the
- * customer's configured `smking.webhook_secret`, then evicts the
- * corresponding CmsClient cache entry so the next page render reads
- * fresh content from SaaS instead of waiting for the 5min TTL.
+ * Unified SmKing webhook receiver (v0.8.0+) — `/api/smking/webhook`
+ * auto-mounted by SmkingServiceProvider.
  *
- * Wire contract — matches @smking-saas/features/cms/lib/webhook.ts
- * (signWebhook):
+ * Substrate-pivot: single endpoint dispatched by `payload.kind`
+ * (`"aeo" | "cms_page" | ...`). HMAC-SHA256 verified against
+ * `smking.webhook_secret`; on match, evicts the corresponding cache
+ * entries so the next page render reads fresh content from SaaS.
+ *
+ * Wire contract — matches the SaaS unified emitter
+ * (@smking-saas/features/cms/lib/webhook.ts):
  *
  *   POST /api/smking/webhook
  *   X-Smking-Signature: sha256=<hex>
- *   X-Smking-Event: cms.page.published
  *
- *   { "event": "cms.page.published",
- *     "siteId": "uuid",
- *     "slug": "hello",
- *     "publishedAt": "2026-05-14T10:00:00Z",
- *     "deliveredAt": "2026-05-14T10:00:01.234Z" }
+ *   { "kind": "aeo" | "cms_page",
+ *     "paths"?: ["/products/foo"],     ← AEO uses paths
+ *     "slugs"?: ["hello"],             ← CMS uses slugs
+ *     "deliveredAt": "2026-05-15T10:00:00Z" }
  *
- * Returns 200 on accept / cache-eviction, 401 on bad sig, 400 on
- * malformed payload. Always responds quickly (no upstream calls in
- * handler) — SaaS treats >2xx as delivery failure and logs warning,
- * but does NOT retry (acceptable for cache invalidation: next TTL
+ * Returns 200 on accept / eviction, 401 on bad sig, 400 on
+ * malformed payload, 503 on missing webhook_secret. SaaS treats
+ * non-2xx as delivery failure (logged, not retried — next TTL
  * cycle catches up).
+ *
+ * AEO behaviour: Laravel SDK currently has no `smking:aeo:*` cache
+ * key namespace (AEO Laravel uses TTL + circuit breaker, not push-
+ * based invalidation). For `kind=aeo` payloads we acknowledge (200)
+ * and log — operator may use `php artisan smking:cache:purge` for
+ * explicit AEO eviction. Push-based AEO invalidation can land later
+ * without touching this endpoint's contract.
  */
 class WebhookController
 {
@@ -50,9 +55,6 @@ class WebhookController
     {
         $secret = $this->config->get('smking.webhook_secret');
         if (! is_string($secret) || $secret === '') {
-            // Misconfigured customer site — webhook arrives but no
-            // secret to verify against. 503 (vs 401) because the bug
-            // is on receiver side, not signer.
             $this->logger?->warning(
                 'smking: webhook received but SMKING_WEBHOOK_SECRET not configured',
             );
@@ -60,10 +62,6 @@ class WebhookController
             return response()->json(['error' => 'webhook_secret_missing'], 503);
         }
 
-        // Raw body needed for signature verification — re-serialising
-        // through JSON parse would change byte order / spacing and
-        // invalidate the HMAC. Laravel's $request->getContent()
-        // returns the raw body untouched.
         $rawBody = $request->getContent();
         $providedSig = $request->header('X-Smking-Signature');
 
@@ -73,40 +71,67 @@ class WebhookController
             return response()->json(['error' => 'invalid_signature'], 401);
         }
 
-        // Parse payload AFTER sig check — we trust the bytes only when
-        // signature matches.
         $payload = json_decode($rawBody, true);
         if (! is_array($payload)) {
             return response()->json(['error' => 'invalid_payload'], 400);
         }
 
-        $event = $payload['event'] ?? null;
-        $slug = $payload['slug'] ?? null;
-
-        if ($event !== 'cms.page.published' || ! is_string($slug) || $slug === '') {
-            // Unknown event types or missing slug — accept (200) so SaaS
-            // doesn't retry, but do nothing. Forward-compat: future
-            // event types (cms.page.unpublished / cms.page.deleted) can
-            // add branches without breaking older customer SDKs.
+        $kind = $payload['kind'] ?? null;
+        if (! is_string($kind) || $kind === '') {
+            // No kind → no dispatch target. Acknowledge so SaaS doesn't
+            // retry but record telemetry.
             return response()->json(['ok' => true, 'note' => 'no_action_taken']);
         }
 
-        // Evict the CmsClient cache for this slug. CmsClient uses
-        // cacheNamespace + slug as the cache key; reconstruct that here.
-        $this->evictCmsCache($slug);
+        $evicted = 0;
+        $paths = isset($payload['paths']) && is_array($payload['paths'])
+            ? array_values(array_filter($payload['paths'], 'is_string'))
+            : [];
+        $slugs = isset($payload['slugs']) && is_array($payload['slugs'])
+            ? array_values(array_filter($payload['slugs'], 'is_string'))
+            : [];
 
-        $this->logger?->info('smking: CMS cache evicted via webhook', [
-            'slug' => $slug,
-            'event' => $event,
+        switch ($kind) {
+            case 'cms_page':
+                foreach ($slugs as $slug) {
+                    $this->evictCmsCache($slug);
+                    $evicted++;
+                }
+                $this->logger?->info('smking: CMS cache evicted via webhook', [
+                    'slugs' => $slugs,
+                ]);
+                break;
+
+            case 'aeo':
+                // AEO Laravel SDK uses TTL + circuit breaker; no push-
+                // invalidate cache namespace today. Ack + log for
+                // observability; operator can `smking:cache:purge` for
+                // explicit eviction.
+                $this->logger?->info(
+                    'smking: AEO webhook received (no Laravel push-invalidate cache today)',
+                    ['paths' => $paths],
+                );
+                break;
+
+            default:
+                // Forward-compat: future kinds (widget_config, ...) can
+                // add branches without breaking older SDKs. 200-ack
+                // prevents SaaS retry storms during rollout.
+                $this->logger?->info('smking: webhook ack for unknown kind', [
+                    'kind' => $kind,
+                ]);
+                break;
+        }
+
+        return response()->json([
+            'ok' => true,
+            'kind' => $kind,
+            'evicted' => $evicted,
         ]);
-
-        return response()->json(['ok' => true, 'evicted' => $slug]);
     }
 
     /**
-     * Constant-time HMAC-SHA256 verification. `hash_equals` runs in
-     * constant time over equal-length strings so timing attacks can't
-     * extract the secret from response latency.
+     * Constant-time HMAC-SHA256 verification.
      */
     private function verifySignature(
         string $rawBody,

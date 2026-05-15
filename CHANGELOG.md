@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.11.0 — Substrate pivot: unified webhook channel (2026-05-15)
+
+**BREAKING.** Companion to `@soloworks/smking-next` v0.11.0.
+
+### Webhook contract changed
+
+The receiver at `/api/smking/webhook` is now **unified for all SaaS surfaces** (AEO, CMS, future widgets). Dispatch is by `kind`, not by `event`:
+
+```diff
+# v0.10.x payload (CMS-only):
+- { "event": "cms.page.published", "siteId": "uuid", "slug": "hello",
+-   "publishedAt": "...", "deliveredAt": "..." }
+
+# v0.11.0 payload (substrate-unified):
++ { "kind": "cms_page" | "aeo" | "<future>",
++   "paths"?: ["/products/foo"],   // AEO uses paths
++   "slugs"?: ["hello", "about"],  // CMS uses slugs (now bulk)
++   "deliveredAt": "..." }
+```
+
+Customers on v0.10.x will see signature verify pass but `kind` missing → 200 ack with `note: "no_action_taken"`. Upgrade to v0.11.0 to re-enable push invalidation under the new contract.
+
+### What's the same
+
+- Endpoint path: `/api/smking/webhook`
+- HMAC-SHA256 with `SMKING_WEBHOOK_SECRET`
+- `hash_equals` constant-time signature verify
+- ServiceProvider auto-mount + `php artisan route:list` visibility
+- Doctor command coverage
+
+### What's new
+
+- **`kind=cms_page` + `slugs[]`** → evicts all matching CMS cache keys (now bulk).
+- **`kind=aeo` + `paths[]`** → acknowledged + logged (Laravel AEO SDK is TTL + circuit-breaker today; push invalidation lands later. Use `php artisan smking:cache:purge` for explicit AEO eviction.)
+- **`kind=<unknown>`** → forward-compat ack. Future surfaces extend the discriminator without breaking older SDKs.
+
+### Migration
+
+```bash
+composer require smking/laravel:^0.11
+```
+
+No config changes — same env, same path, same secret.
+
+---
+
 ## v0.10.2 — Fix `TypeError: timeout() must be of type int, float given` on Laravel 11+
 
 Surfaced by sleepytofu.com running `php artisan smking:doctor` post-install on Laravel 11 / PHP 8.4. The doctor's path-status probe crashed with:

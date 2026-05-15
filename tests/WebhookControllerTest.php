@@ -11,7 +11,6 @@ class WebhookControllerTest extends TestCase
     protected function defineEnvironment($app): void
     {
         parent::defineEnvironment($app);
-        // Webhook tests need cache enabled so we can prove cache eviction.
         $app['config']->set('smking.cache.enabled', true);
         $app['config']->set('smking.webhook_secret', 'test_secret_abc');
     }
@@ -28,7 +27,6 @@ class WebhookControllerTest extends TestCase
             [
                 'CONTENT_TYPE' => 'application/json',
                 'HTTP_X_SMKING_SIGNATURE' => $sig,
-                'HTTP_X_SMKING_EVENT' => $payload['event'] ?? 'unknown',
             ],
             $body,
         );
@@ -36,13 +34,15 @@ class WebhookControllerTest extends TestCase
 
     public function test_invalid_signature_returns_401(): void
     {
-        $response = $this->signedPost('test_secret_abc', [
-            'event' => 'cms.page.published',
-            'siteId' => 'uuid',
-            'slug' => 'hello',
-            'publishedAt' => '2026-05-14T10:00:00Z',
-            'deliveredAt' => '2026-05-14T10:00:01Z',
-        ], 'sha256=00deadbeef'.str_repeat('0', 56));
+        $response = $this->signedPost(
+            'test_secret_abc',
+            [
+                'kind' => 'cms_page',
+                'slugs' => ['hello'],
+                'deliveredAt' => '2026-05-15T10:00:00Z',
+            ],
+            'sha256=00deadbeef'.str_repeat('0', 56),
+        );
 
         $response->assertStatus(401);
         $response->assertJsonPath('error', 'invalid_signature');
@@ -52,58 +52,71 @@ class WebhookControllerTest extends TestCase
     {
         config()->set('smking.webhook_secret', null);
         $response = $this->signedPost('whatever', [
-            'event' => 'cms.page.published',
-            'slug' => 'hello',
+            'kind' => 'cms_page',
+            'slugs' => ['hello'],
         ]);
 
         $response->assertStatus(503);
         $response->assertJsonPath('error', 'webhook_secret_missing');
     }
 
-    public function test_unknown_event_returns_200_no_action(): void
+    public function test_no_kind_returns_200_no_action(): void
     {
         $response = $this->signedPost('test_secret_abc', [
-            'event' => 'cms.page.unknown',
-            'slug' => 'hello',
+            'slugs' => ['hello'],
         ]);
 
         $response->assertStatus(200);
         $response->assertJsonPath('note', 'no_action_taken');
     }
 
-    public function test_missing_slug_returns_200_no_action(): void
+    public function test_unknown_kind_returns_200_no_action(): void
     {
         $response = $this->signedPost('test_secret_abc', [
-            'event' => 'cms.page.published',
-            // no slug
+            'kind' => 'future_widget_config',
+            'paths' => ['/widgets/abc'],
         ]);
 
         $response->assertStatus(200);
-        $response->assertJsonPath('note', 'no_action_taken');
+        $response->assertJsonPath('kind', 'future_widget_config');
+        $response->assertJsonPath('evicted', 0);
     }
 
-    public function test_valid_signature_evicts_cms_cache(): void
+    public function test_aeo_payload_ack_without_eviction(): void
     {
-        // Pre-seed the cache key shape CmsClient uses so we can assert
-        // it gets forgotten. Cache key prefix + namespace + slug.
+        $response = $this->signedPost('test_secret_abc', [
+            'kind' => 'aeo',
+            'paths' => ['/products/foo', '/products/bar'],
+            'deliveredAt' => '2026-05-15T10:00:00Z',
+        ]);
+
+        $response->assertStatus(200);
+        $response->assertJsonPath('kind', 'aeo');
+        // AEO Laravel SDK has no push-invalidate cache namespace today.
+        $response->assertJsonPath('evicted', 0);
+    }
+
+    public function test_cms_page_payload_evicts_cms_cache(): void
+    {
         $apiKey = config('smking.api_key');
         $baseUrl = rtrim(config('smking.base_url'), '/');
         $namespace = substr(hash('sha256', $apiKey.'|'.$baseUrl), 0, 12);
-        $cacheKey = 'smking:cms:'.$namespace.':hello';
+        $helloKey = 'smking:cms:'.$namespace.':hello';
+        $aboutKey = 'smking:cms:'.$namespace.':about';
 
-        Cache::put($cacheKey, 'stale_value', 300);
-        $this->assertSame('stale_value', Cache::get($cacheKey));
+        Cache::put($helloKey, 'stale_hello', 300);
+        Cache::put($aboutKey, 'stale_about', 300);
 
         $response = $this->signedPost('test_secret_abc', [
-            'event' => 'cms.page.published',
-            'siteId' => 'site-uuid',
-            'slug' => 'hello',
-            'publishedAt' => '2026-05-14T10:00:00Z',
-            'deliveredAt' => '2026-05-14T10:00:01Z',
+            'kind' => 'cms_page',
+            'slugs' => ['hello', 'about'],
+            'deliveredAt' => '2026-05-15T10:00:00Z',
         ]);
 
         $response->assertStatus(200);
-        $response->assertJsonPath('evicted', 'hello');
-        $this->assertNull(Cache::get($cacheKey), 'cache should be evicted');
+        $response->assertJsonPath('kind', 'cms_page');
+        $response->assertJsonPath('evicted', 2);
+        $this->assertNull(Cache::get($helloKey));
+        $this->assertNull(Cache::get($aboutKey));
     }
 }
