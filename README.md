@@ -57,6 +57,47 @@ Disable auto-injection and render where you want:
 
 The `<x-smking-meta />` component mirrors `getSmkingMetadata()` from `@smking/next` — call it inside `<head>` and it emits exactly the SEO tags the API has values for, falling back to the `fallback-*` props otherwise. Use it when you want SEO meta in your Blade layout but body injection from the middleware.
 
+## CMS rendering (optional, v0.11.0+)
+
+The base install above only wires AEO. If you author content in the smking dashboard's CMS and want to render it on your Laravel site, use the `<x-smking-cms slug="…" />` Blade component.
+
+The SDK **does not have a "CMS root" config** — you choose any URL prefix (`/blog`, `/knowledge`, `/shop/articles`) and wire your own route. The component takes a `slug` prop, fetches the published page from `${SMKING_BASE_URL}/api/v1/public/page?slug=…`, and renders the Tiptap ProseMirror JSON as `<article class="smk-cms">…</article>` server-side via `ueberdosis/tiptap-php`.
+
+### Flat slug
+
+```php
+// routes/web.php
+Route::get('/blog/{slug}', function (string $slug) {
+    return view('blog-page', ['slug' => $slug]);
+});
+```
+
+```blade
+{{-- resources/views/blog-page.blade.php --}}
+<x-smking-cms :slug="$slug" />
+```
+
+This handles `/blog/hello` but **not** `/blog/seo/intro` — Laravel's default route param rejects `/`.
+
+### Nested slugs (`/blog/123`, `/blog/seo/intro`)
+
+smking CMS slugs can be nested. Use a catch-all parameter with the `.*` regex constraint:
+
+```php
+// routes/web.php
+Route::get('/blog/{path}', function (string $path) {
+    return view('blog-page', ['slug' => $path]);
+})->where('path', '.*');  // ← required; without this Laravel rejects nested paths
+```
+
+The same `<x-smking-cms :slug="$slug" />` Blade view works for both flat and nested. Slug is purely what your route resolver passes in — single-segment (`hello`) or multi-segment (`blog/seo/intro`) both match dashboard slug format.
+
+### Cache invalidation
+
+CMS responses cache server-side for 5 minutes. When you publish, rename, or archive a page in the dashboard, smking SaaS POSTs a signed webhook to `https://<your-site>/api/smking/webhook` (auto-mounted by the SDK in v0.11+). The handler verifies HMAC against `SMKING_WEBHOOK_SECRET` and evicts the matching cache so visitors see the new content on the next request.
+
+If `SMKING_WEBHOOK_SECRET` is unset, the webhook route returns 503 and cache invalidation falls back to TTL-based expiry.
+
 ## Config (config/smking.php)
 
 | Key | Default | Notes |
