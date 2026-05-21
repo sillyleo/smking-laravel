@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.13.1 — Laravel 13 support (2026-05-21)
+
+Patch — adds Laravel 13 to the supported framework versions. SDK was previously pinned to Laravel 10/11/12; fresh `laravel new` projects (which now spawn Laravel 13.x by default) were rejected by smking-wizard's pre-install version check (ticket `dr_*` filed to SaaS).
+
+### Changes
+
+- `composer.json` — `illuminate/contracts|support|http` accept `^13.0` in addition to `^10.0|^11.0|^12.0`.
+
+### Tested
+
+- Phpunit suite (170 tests) passes against Laravel 12 (testbench v10) — no regression on existing supported versions.
+- Laravel 13 runtime not exhaustively tested; SDK code uses standard middleware / controller / config patterns that are stable across Laravel major versions. File an issue if anything misbehaves under Laravel 13.
+
+### Customer
+
+Composer caret rule: `"smking/laravel": "^0.13"` resolves both v0.13.0 and v0.13.1 — no constraint bump needed, `composer update smking/laravel` is enough.
+
 ## v0.13.0 — Install via wizard: middleware takeover → dedicated controllers (2026-05-21)
 
 **BREAKING.** Companion to `@soloworks/smking-wizard` v0.3.0.
