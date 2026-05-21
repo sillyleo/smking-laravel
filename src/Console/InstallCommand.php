@@ -20,7 +20,7 @@ use Illuminate\Console\Command;
  *   2. Manual fallback (for air-gapped / scripted installs): this command
  *      prints the steps for a customer to do by hand. Each step is a
  *      separate artisan command or file edit; the customer reads, executes,
- *      moves on. v0.8.0 deliberately keeps the manual path documented in
+ *      moves on. v0.13.0 deliberately keeps the manual path documented in
  *      one place rather than scattering it across README + multiple
  *      vendor:publish tags.
  *
@@ -64,7 +64,7 @@ class InstallCommand extends Command
         $this->newLine();
         $this->line('<comment>⚠ CMS surface</comment>: the <x-smking-cms /> Blade component is available but the');
         $this->line('  SaaS-side capability is OFF by default. Production use waits for audit #6');
-        $this->line('  hardening (v0.8.x patch). Until then, enable CMS only in staging via the dashboard.');
+        $this->line('  hardening (v0.13.x patch). Until then, enable CMS only in staging via the dashboard.');
         $this->newLine();
 
         return self::SUCCESS;

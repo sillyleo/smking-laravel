@@ -8,7 +8,7 @@ use Smking\Laravel\AeoClient;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
- * Serves /llms.txt as a dedicated route (replaces v0.7 middleware takeover).
+ * Serves /llms.txt as a dedicated route (replaces middleware takeover removed in v0.13.0).
  *
  * See SitemapController docblock for rationale on dedicated controller vs
  * middleware takeover. AeoClient::fetchPublicFile('llms_txt') handles all

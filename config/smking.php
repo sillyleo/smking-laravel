@@ -385,7 +385,7 @@ return [
         'content_signal' => 'search=yes, ai-input=no, ai-train=no',
     ],
 
-    // v0.8.0: removed `takeover` config block. Middleware no longer auto-
+    // v0.13.0: removed `takeover` config block. Middleware no longer auto-
     // serves /sitemap.xml /robots.txt /llms.txt. smking-wizard registers
     // dedicated routes (SitemapController / LlmsTxtController) in customer's
     // routes/web.php instead — Laravel idiomatic, debuggable via

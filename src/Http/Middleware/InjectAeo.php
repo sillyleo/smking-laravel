@@ -40,11 +40,10 @@ class InjectAeo
     {
         $response = $next($request);
 
-        // v0.8.0: middleware no longer takes over /sitemap.xml /robots.txt
+        // v0.13.0: middleware no longer takes over /sitemap.xml /robots.txt
         // /llms.txt. Wizard registers dedicated controllers (SitemapController
-        // / LlmsTxtController) in customer routes/web.php instead. See
-        // docs/v0.8-migration.md for rationale (Laravel idiomatic + removed
-        // takeover-bypass bug class).
+        // / LlmsTxtController) in customer routes/web.php instead. Rationale:
+        // Laravel idiomatic + removed takeover-bypass bug class (audit #3).
 
         if (! $this->shouldInject($request, $response)) {
             return $response;

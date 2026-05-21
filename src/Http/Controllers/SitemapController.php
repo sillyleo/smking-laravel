@@ -8,7 +8,7 @@ use Smking\Laravel\AeoClient;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
- * Serves /sitemap.xml as a dedicated route (replaces v0.7 middleware takeover).
+ * Serves /sitemap.xml as a dedicated route (replaces middleware takeover removed in v0.13.0).
  *
  * Why dedicated controller instead of middleware takeover:
  *   - Explicit registration in customer's routes/web.php — visible in
