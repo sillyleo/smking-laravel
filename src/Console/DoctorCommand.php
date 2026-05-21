@@ -40,8 +40,6 @@ class DoctorCommand extends Command
             $this->checkMiddlewareInKernel($app),
             $this->checkApiReachable($http),
             $this->checkPathStatus($client, (string) $this->option('path')),
-            ...$this->checkTakeoverFlags(),
-            ...$this->checkTakeoverSaasEndpoints($http),
         ];
 
         $hasFailure = false;
@@ -338,111 +336,6 @@ class DoctorCommand extends Command
         }
 
         return ['status' => 'info', 'label' => "Path {$path} status", 'detail' => $aeo->status];
-    }
-
-    /**
-     * Path-takeover config flags. v0.9.0+ — middleware auto-serves
-     * /sitemap.xml, /robots.txt, /llms.txt when the customer's app would
-     * 404 on them. Each flag is info-only (false is a valid choice for
-     * customers who want to keep their own routing), but we surface it
-     * so the operator can confirm the state matches their expectation
-     * without grepping `config/smking.php` by hand.
-     *
-     * @return list<array{status: 'pass'|'fail'|'info', label: string, detail: string}>
-     */
-    private function checkTakeoverFlags(): array
-    {
-        /** @var array<string, mixed> $flags */
-        $flags = (array) config('smking.takeover', []);
-        $kinds = [
-            'sitemap' => '/sitemap.xml',
-            'robots' => '/robots.txt',
-            'llms_txt' => '/llms.txt',
-        ];
-
-        $checks = [];
-        foreach ($kinds as $key => $path) {
-            // Default ON (per config/smking.php defaults) — only false is
-            // an explicit opt-out we surface differently.
-            $enabled = ! array_key_exists($key, $flags) || $flags[$key] !== false;
-            $checks[] = [
-                'status' => 'info',
-                'label' => "Takeover {$path}",
-                'detail' => $enabled
-                    ? 'enabled — middleware will serve when your app returns 404'
-                    : 'disabled (config/smking.php takeover.'.$key.' = false)',
-            ];
-        }
-
-        return $checks;
-    }
-
-    /**
-     * Live probe of the three takeover SaaS endpoints. Confirms the
-     * server-side content is reachable + non-empty before the middleware
-     * tries to fall back to it. Skipped when api_key or base_url is
-     * missing (those are checked above; rerun doctor once they're set).
-     *
-     * @return list<array{status: 'pass'|'fail'|'info', label: string, detail: string}>
-     */
-    private function checkTakeoverSaasEndpoints(HttpFactory $http): array
-    {
-        $apiKey = (string) config('smking.api_key', '');
-        $baseUrl = (string) config('smking.base_url', '');
-
-        if ($apiKey === '' || $baseUrl === '') {
-            return [[
-                'status' => 'info',
-                'label' => 'Takeover SaaS endpoints',
-                'detail' => 'skipped — set SMKING_API_KEY and SMKING_BASE_URL first',
-            ]];
-        }
-
-        $endpoints = [
-            'sitemap' => '/api/v1/public/sitemap.xml',
-            'robots' => '/api/v1/public/robots.txt',
-            'llms_txt' => '/api/v1/public/llms-txt',
-        ];
-
-        $checks = [];
-        foreach ($endpoints as $kind => $path) {
-            $url = rtrim($baseUrl, '/').$path;
-            try {
-                $response = $http->timeout(3)->get($url, ['key' => $apiKey]);
-            } catch (Throwable $e) {
-                $checks[] = [
-                    'status' => 'fail',
-                    'label' => "Takeover endpoint {$kind}",
-                    'detail' => 'connection failed: '.$e->getMessage(),
-                ];
-
-                continue;
-            }
-
-            $status = $response->status();
-            if ($status >= 200 && $status < 300) {
-                $bytes = strlen((string) $response->body());
-                $checks[] = [
-                    'status' => 'pass',
-                    'label' => "Takeover endpoint {$kind}",
-                    'detail' => "HTTP {$status} · {$bytes} bytes from {$path}",
-                ];
-            } elseif ($status === 401) {
-                $checks[] = [
-                    'status' => 'fail',
-                    'label' => "Takeover endpoint {$kind}",
-                    'detail' => "HTTP 401 from {$path} — SMKING_API_KEY rejected",
-                ];
-            } else {
-                $checks[] = [
-                    'status' => 'fail',
-                    'label' => "Takeover endpoint {$kind}",
-                    'detail' => "HTTP {$status} from {$path}",
-                ];
-            }
-        }
-
-        return $checks;
     }
 
     /**

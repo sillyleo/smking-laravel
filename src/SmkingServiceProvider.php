@@ -12,6 +12,7 @@ use ReflectionException;
 use Smking\Laravel\Console\CachePurgeCommand;
 use Smking\Laravel\Console\CircuitStatusCommand;
 use Smking\Laravel\Console\DoctorCommand;
+use Smking\Laravel\Console\InstallCommand;
 use Smking\Laravel\Console\PublishRobotsTxtCommand;
 use Smking\Laravel\Http\Controllers\WebhookController;
 use Smking\Laravel\Http\Middleware\InjectAeo;
@@ -86,6 +87,7 @@ class SmkingServiceProvider extends ServiceProvider
                 DoctorCommand::class,
                 CachePurgeCommand::class,
                 CircuitStatusCommand::class,
+                InstallCommand::class,
                 PublishRobotsTxtCommand::class,
             ]);
         }
@@ -109,17 +111,17 @@ class SmkingServiceProvider extends ServiceProvider
         }
 
         if (! method_exists($this->app, 'routesAreCached') || $this->app->routesAreCached()) {
-            // Production route cache present — customer must `route:clear`
-            // for the smking webhook route to land. Skip silently here so
-            // we don't crash other request types; doctor command surfaces
-            // the missing route when ran.
+            // Production route cache present — auto-mount is skipped here.
+            // smking-wizard registers `require base_path('vendor/smking/laravel/routes/webhook.php')`
+            // in customer's routes/api.php so route:cache picks it up like
+            // any user-defined route (audit handoff #7 fix).
             return;
         }
 
-        \Illuminate\Support\Facades\Route::post(
-            $this->app['config']->get('smking.webhook.path', '/api/smking/webhook'),
-            WebhookController::class,
-        )->name('smking.webhook')->withoutMiddleware(['web', 'auth']);
+        // Auto-mount for unconfigured installs (no wizard run, no route:cache).
+        // Once wizard runs, customer's routes/api.php require produces the
+        // same Route::post — Laravel dedupes by name + method + URI.
+        require __DIR__.'/../routes/webhook.php';
     }
 
     private function registerMiddleware(): void
