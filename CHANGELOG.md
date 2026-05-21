@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.13.0 — Install via wizard: middleware takeover → dedicated controllers (2026-05-21)
+
+**BREAKING.** Companion to `@soloworks/smking-wizard` v0.3.0.
+
+### Removed (breaking)
+
+- **`takeover` config block** (`config/smking.php`) — removed entirely. The middleware no longer auto-serves `/sitemap.xml`, `/robots.txt`, `/llms.txt` when customer's app would 404. Customers register dedicated routes via `smking-wizard` or manually:
+
+  ```php
+  Route::get('/sitemap.xml', \Smking\Laravel\Http\Controllers\SitemapController::class);
+  Route::get('/llms.txt', \Smking\Laravel\Http\Controllers\LlmsTxtController::class);
+  ```
+
+- **`InjectAeo::shouldTakeoverPath()` / `takeoverKindFromRequest()` / `serveTakeover()`** — removed from middleware (-85 lines).
+- **`DoctorCommand::checkTakeoverFlags()` / `checkTakeoverSaasEndpoints()`** — removed. Doctor no longer probes takeover endpoints.
+- **`tests/InjectAeoTakeoverTest.php`** + 3 doctor takeover tests — removed.
+
+### Added
+
+- **`SitemapController` + `LlmsTxtController`** at `src/Http/Controllers/` — thin shells over `AeoClient::fetchPublicFile()` with 503 fail-mode (not empty body — Google retries instead of de-indexing on temporary outage).
+- **`routes/webhook.php`** — extracted webhook route to standalone file so customer `routes/api.php` can `require` it (route:cache-safe; solves audit handoff #7 — `php artisan route:cache` no longer drops smking webhook route).
+- **`smking:install` command** — install instructions + wizard pointer (full install via `npx @soloworks/smking-wizard`).
+
+### Solves SDK customer audit handoff client review
+
+- **#1 attack surface** — wizard's conservative scope defaults
+- **#2 SEO override** — `inject.mode=override` remains the explicit stance (smking IS the SEO solution)
+- **#3 takeover bypass bug class** — middleware takeover removed entirely
+- **#7 webhook routes:cache** — wizard auto-requires standalone webhook file
+
+(#4 CMS contract, #5 telemetry transparency, #6 CMS hardening, #8 supply chain → separate v0.13.x patches.)
+
+### Customer migration
+
+- Composer caret rule: `"smking/laravel": "^0.12"` resolves to `>=0.12.0 <0.13.0`. Bump `composer.json` to `"smking/laravel": "^0.13"` then `composer update smking/laravel`.
+- Run `npx @soloworks/smking-wizard` once to register new routes — re-running an existing install is idempotent (marker fences prevent duplicate routes / robots.txt blocks).
+- Customers with custom `takeover.sitemap = false` / etc. config: delete the `takeover` block from `config/smking.php` (Laravel will warn about unknown keys otherwise).
+
+### Phpunit
+
+170 tests passing.
+
 ## v0.12.0 — AI crawler + AI referral telemetry (2026-05-15)
 
 **Companion to `@soloworks/smking-next` v0.12.0.**

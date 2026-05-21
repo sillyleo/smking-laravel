@@ -40,16 +40,10 @@ class InjectAeo
     {
         $response = $next($request);
 
-        // v0.9.0: path-takeover branch. Customer-facing /sitemap.xml,
-        // /robots.txt, /llms.txt — if customer's app would 404 (no route),
-        // SDK auto-serves the SaaS-generated version. Customer's existing
-        // 200 response (their own valid file) is never overridden.
-        if ($this->shouldTakeoverPath($request, $response)) {
-            $takeover = $this->serveTakeover($request, $response);
-            if ($takeover !== null) {
-                return $takeover;
-            }
-        }
+        // v0.13.0: middleware no longer takes over /sitemap.xml /robots.txt
+        // /llms.txt. Wizard registers dedicated controllers (SitemapController
+        // / LlmsTxtController) in customer routes/web.php instead. Rationale:
+        // Laravel idiomatic + removed takeover-bypass bug class (audit #3).
 
         if (! $this->shouldInject($request, $response)) {
             return $response;
@@ -691,90 +685,4 @@ class InjectAeo
         return str_replace('--', '__', $value);
     }
 
-    /**
-     * Decide whether to enter the path-takeover branch. Triggered when:
-     *   - GET/HEAD request,
-     *   - on one of the three managed paths (sitemap.xml / robots.txt / llms.txt),
-     *   - customer app returned 404 / 410 (i.e. didn't define their own route)
-     *     OR returned 200 with empty body,
-     *   - per-file `takeover.{kind}` config flag is true (default true),
-     *   - SDK is configured (api_key + base_url set).
-     *
-     * Customer's own valid 200 response is left alone — explicit takeover of
-     * a working customer file would be hostile.
-     */
-    private function shouldTakeoverPath(Request $request, Response $response): bool
-    {
-        if (app()->runningUnitTests() && ! (bool) $this->config->get('smking.inject_in_tests', false)) {
-            return false;
-        }
-        if (! in_array($request->method(), ['GET', 'HEAD'], true)) {
-            return false;
-        }
-        if (! $this->takeoverKindFromRequest($request)) {
-            return false;
-        }
-        // 404 (no route) / 410 (gone) are the canonical "customer doesn't
-        // serve this" signals. A 5xx is the customer's app actively erroring
-        // — don't paper over that with smking content; let it surface.
-        $status = $response->getStatusCode();
-        if ($status === 404 || $status === 410) {
-            return true;
-        }
-        // 200 with empty body = customer route exists but produced nothing
-        // (rare, but happens with broken sitemap generators). Treat as
-        // takeover candidate.
-        if ($status === 200) {
-            $content = $response->getContent();
-            return is_string($content) && trim($content) === '';
-        }
-
-        return false;
-    }
-
-    private function takeoverKindFromRequest(Request $request): ?string
-    {
-        // Path() drops the leading slash, so compare against unprefixed.
-        $path = $request->path();
-        return match ($path) {
-            'sitemap.xml' => 'sitemap',
-            'robots.txt' => 'robots',
-            'llms.txt' => 'llms_txt',
-            default => null,
-        };
-    }
-
-    /**
-     * Build the takeover response. Returns null if the kind is disabled in
-     * config, if SDK can't reach SaaS, or if the SaaS returned nothing — in
-     * any of those cases the caller falls back to the original customer
-     * response (don't break the site).
-     */
-    private function serveTakeover(Request $request, Response $response): ?Response
-    {
-        $kind = $this->takeoverKindFromRequest($request);
-        if ($kind === null) {
-            return null;
-        }
-        $flags = (array) $this->config->get('smking.takeover', []);
-        // Default is enabled — `takeover.sitemap = false` is the opt-out.
-        if (array_key_exists($kind, $flags) && $flags[$kind] === false) {
-            return null;
-        }
-
-        $result = $this->client->fetchPublicFile($kind);
-        if ($result === null) {
-            return null;
-        }
-
-        return new Response(
-            $result['body'],
-            200,
-            [
-                'Content-Type' => $result['contentType'],
-                'X-Smking-Takeover' => $kind,
-                'Cache-Control' => 'public, max-age=3600',
-            ],
-        );
-    }
 }

@@ -385,25 +385,9 @@ return [
         'content_signal' => 'search=yes, ai-input=no, ai-train=no',
     ],
 
-    /*
-    |--------------------------------------------------------------------------
-    | Path-Takeover (v0.9.0)
-    |--------------------------------------------------------------------------
-    |
-    | When the customer's app would 404 on one of the canonical AEO/SEO file
-    | paths (/sitemap.xml, /robots.txt, /llms.txt), the InjectAeo middleware
-    | auto-serves the smking SaaS-generated version on their behalf. Default
-    | ON for all three — installing the SDK is the customer's consent to
-    | smking managing these files. Customer's own 200 response (their own
-    | valid file) is NEVER overridden.
-    |
-    | Per-file opt-out: set the corresponding key to false to leave that
-    | path entirely to the customer's own routing.
-    |
-    */
-    'takeover' => [
-        'sitemap' => true,
-        'robots' => true,
-        'llms_txt' => true,
-    ],
+    // v0.13.0: removed `takeover` config block. Middleware no longer auto-
+    // serves /sitemap.xml /robots.txt /llms.txt. smking-wizard registers
+    // dedicated routes (SitemapController / LlmsTxtController) in customer's
+    // routes/web.php instead — Laravel idiomatic, debuggable via
+    // `php artisan route:list`, removes takeover-bypass bug class.
 ];
