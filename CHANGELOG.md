@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.14.0 — Substrate v2 Block[] render parity (2026-05-22)
+
+**Companion to `@soloworks/smking-next` v0.13.0.** Laravel SDK was lagging the substrate pivot — SaaS public API has returned `page.blocks` (Block[]) since v0.11 but the Laravel SDK kept expecting the legacy `page.body` (Tiptap ProseMirror JSON) and silently fell through to `not_found`. Customer pages on `<x-smking-cms />` rendered empty regardless of what was published on the dashboard.
+
+### Added
+
+- **`CmsPage->blocks`** — new field carrying the substrate v2 Block[] payload (`{component, id, props}`). Populated when SaaS returns `page.blocks`. Mutually exclusive with the legacy `bodyHtml` field in practice.
+- **`smking::block` partial** (`resources/views/block.blade.php`) — dispatches each block to its rendered markup. v0.14.0 ships these components:
+  - `article` — emits `props.html` (server-rendered by Plate `serializeHtml` on the SaaS side; SDK ships zero editor deps for this surface).
+  - `hero` — title + subtitle + image + CTA card.
+  - `nav-recent-posts` / `nav-taxonomy-list` — `<ul>` of cards built from `props.snapshot` (materialized at publish time by the SaaS — never live-fetched).
+  - `nav-search` — `<input>` + inline IIFE doing client-side substring filter against `props.index`; XSS-hardened JSON-in-script (`</` → `<`).
+  - `carousel` — markup only this release; the Web Component runtime that upgrades `<smking-carousel>` into a swipe widget lands in v0.14.1.
+  - Unknown components → empty marker (`smk-block--unknown`) so customer pages don't 500 if SaaS ships a new block type before SDK catches up.
+- **`CmsClient::fetch` accepts both shapes** — `blocks` wins when present; `body` is the back-compat fallback for pre-pivot SaaS deployments. The legacy Tiptap render path stays wired in case a customer points `SMKING_BASE_URL` at an older self-hosted SaaS.
+
+### Changed (non-breaking)
+
+- `CmsPage::fromArray` signature is now `fromArray(array $payload, ?string $bodyHtml = null, ?array $blocks = null)` — positional callers in the legacy `fromArray($payload, $bodyHtml)` shape still resolve correctly.
+- `cms.blade.php` — if `$cms->blocks` is populated, iterates blocks through `smking::block`; falls back to `{!! $cms->bodyHtml !!}` only when blocks is null (legacy path).
+
+### Pairs with
+
+- `@soloworks/smking-next` v0.13.0 — identical Block[] dispatch + nav-* snapshot rendering on the Next.js side. Feature parity restored across the two SDK stacks.
+- `smking/laravel` v0.13.2 + `@soloworks/smking-wizard` v0.3.3 — install path namespace fixes that unblock customers running Laravel-7-style scaffold from reaching this surface at all.
+
+### Customer
+
+Composer caret rule: `"smking/laravel": "^0.13"` resolves only `>=0.13 <0.14` per composer's 0.x semver — bump constraint to `^0.14` in `composer.json` and run `composer update smking/laravel`.
+
+After updating: nothing else to do. Existing `<x-smking-cms :slug="..." />` usages immediately switch to the Block[] render path; pages that were silently rendering empty start producing real markup.
+
 ## v0.13.2 — Webhook route survives Laravel-7-style RouteServiceProvider (2026-05-22)
 
 **Patch fix — install regression on apps with legacy `RouteServiceProvider`.**

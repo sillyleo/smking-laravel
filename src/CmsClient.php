@@ -91,17 +91,27 @@ class CmsClient
         }
 
         $page = $payload['page'] ?? null;
-        if (! is_array($page) || ! isset($page['body'])) {
+        if (! is_array($page)) {
             return CmsPage::notFound();
         }
 
-        // Render the ProseMirror JSON body to HTML server-side via
-        // tiptap-php. If the document is malformed (e.g. unknown root
-        // type) renderHtml returns '' and we let it through — Blade
-        // shows the title only.
-        $bodyHtml = $this->editor->renderHtml($page['body']);
+        // v0.14.0+ substrate v2: SaaS public API returns `page.blocks`
+        // (Block[]) instead of the legacy `page.body` (Tiptap ProseMirror
+        // JSON). We accept both — `blocks` wins when present so customer
+        // SDKs see new substrate output; `body` is kept as a fallback so
+        // an older SaaS deployment (pre-pivot) doesn't break the SDK.
+        if (isset($page['blocks']) && is_array($page['blocks'])) {
+            return CmsPage::fromArray($payload, blocks: $page['blocks']);
+        }
 
-        return CmsPage::fromArray($payload, $bodyHtml);
+        if (isset($page['body'])) {
+            // Legacy path — Tiptap ProseMirror JSON. EditorFactory
+            // renders it server-side; malformed docs come back as ''.
+            $bodyHtml = $this->editor->renderHtml($page['body']);
+            return CmsPage::fromArray($payload, bodyHtml: $bodyHtml);
+        }
+
+        return CmsPage::notFound();
     }
 
     private function remember(string $slug, callable $resolver): CmsPage
