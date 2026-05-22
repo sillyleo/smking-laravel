@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.13.2 — Webhook route survives Laravel-7-style RouteServiceProvider (2026-05-22)
+
+**Patch fix — install regression on apps with legacy `RouteServiceProvider`.**
+
+After upgrading to v0.13.0 / v0.13.1 the smking-wizard appends `require base_path('vendor/smking/laravel/routes/webhook.php')` to customer `routes/api.php`. Apps that still ship Laravel-7-style `RouteServiceProvider` (with `->namespace('App\Http\Controllers')` wrapping the api group) had Laravel prepend that namespace to the package's `WebhookController::class` string, producing the bogus `App\Http\Controllers\Smking\Laravel\Http\Controllers\WebhookController` and breaking **every** `php artisan` invocation with `UnexpectedValueException: Invalid route action`. 老闆 reproduced 2026-05-22 (audit handoff #9).
+
+### Fixed
+
+- `routes/webhook.php` — swap invokable shorthand `WebhookController::class` for the explicit `[WebhookController::class, '__invoke']` callable array. Laravel's router resolves array-callable actions through the callable pipeline, which bypasses `Illuminate\Routing\RouteAction::makeInvokable()` — the spot where a string controller picks up the surrounding group's namespace prefix. Works identically on Laravel 7 / 8+ / 9+ / 10+ / 11+ / 12+ / 13+.
+- Behaviourally identical on the wire — same path, same name, same middleware skip; existing webhook traffic continues without re-configuration.
+
+### Tested
+
+- New `tests/WebhookRouteNamespaceTest.php` reproduces the legacy wrap (`Route::middleware('api')->namespace('App\\Http\\Controllers')->group(require …)`) and asserts the controller FQCN stays on the package namespace. Pre-fix: throws `UnexpectedValueException`. Post-fix: 4 assertions green.
+- Full phpunit suite (171 tests, 501 assertions) passes against testbench Laravel 12.
+
+### Customer
+
+Composer caret `"smking/laravel": "^0.13"` already resolves v0.13.2 — `composer update smking/laravel` is enough.
+
+After updating, run:
+
+```bash
+php artisan config:clear
+php artisan smking:doctor
+```
+
+Doctor should report green. If the wizard-injected `require base_path('vendor/smking/laravel/routes/webhook.php')` is still in your `routes/api.php`, you can keep it (it lights up `route:cache`); the namespace defence now lives inside the required file itself.
+
 ## v0.13.1 — Laravel 13 support (2026-05-21)
 
 Patch — adds Laravel 13 to the supported framework versions. SDK was previously pinned to Laravel 10/11/12; fresh `laravel new` projects (which now spawn Laravel 13.x by default) were rejected by smking-wizard's pre-install version check (ticket `dr_*` filed to SaaS).
