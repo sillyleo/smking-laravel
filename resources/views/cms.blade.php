@@ -33,6 +33,17 @@
         @if($cms->title)
             <h1 class="smk-cms__title">{{ $cms->title }}</h1>
         @endif
-        {!! $cms->bodyHtml !!}
+
+        {{-- v0.14.0+ substrate v2: `$cms->blocks` is the canonical render
+             path (Block[] dispatched component-by-component). Legacy
+             pre-pivot SaaS deployments fall back to `bodyHtml` (Tiptap-
+             rendered HTML). Exactly one is populated for any given page. --}}
+        @if(is_array($cms->blocks))
+            @foreach($cms->blocks as $_smkingBlock)
+                @include('smking::block', ['block' => $_smkingBlock])
+            @endforeach
+        @elseif($cms->bodyHtml)
+            {!! $cms->bodyHtml !!}
+        @endif
     </article>
 @endif

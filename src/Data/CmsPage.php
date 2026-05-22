@@ -11,11 +11,22 @@ namespace Smking\Laravel\Data;
  * Built from the SaaS public read endpoint:
  *   GET /api/v1/public/page?key=&slug=
  *
- * `bodyHtml` is server-rendered HTML produced by tiptap-php (see
- * EditorFactory) — already escaped, safe to print with `{!!` in Blade.
- * The trust boundary is the smking SaaS output; if you point
- * `SMKING_BASE_URL` at a custom origin, audit that origin's escape
- * behaviour before deploying.
+ * v0.14.0+ — `blocks` (Block[] from substrate v2) is the canonical
+ * shape; `bodyHtml` is the legacy path retained for pre-pivot SaaS
+ * deployments. Exactly one of the two is populated for a ready page.
+ *
+ * - `blocks` — Block[] shape `{component, id, props}`. cms.blade.php
+ *   dispatches each block to its rendered partial. Article blocks
+ *   carry pre-rendered HTML in `props.html` (server-rendered by Plate
+ *   `serializeHtml` on the SaaS side, so SDK ships zero editor deps).
+ *   Other components (hero / nav-* / carousel) get markup composed
+ *   on the SDK side from the block's props.
+ *
+ * - `bodyHtml` — server-rendered HTML produced by tiptap-php
+ *   (EditorFactory). Already escaped, safe to print with `{!!` in
+ *   Blade. Trust boundary is the smking SaaS output; if you point
+ *   `SMKING_BASE_URL` at a custom origin, audit that origin's escape
+ *   behaviour before deploying.
  */
 final class CmsPage
 {
@@ -25,6 +36,12 @@ final class CmsPage
     public const STATUS_SERVER_ERROR = 'server_error';
 
     /**
+     * @param  ?list<array<string, mixed>>  $blocks
+     *   v0.14.0+ — substrate v2 Block[] shape `{component, id, props}`.
+     *   Populated when SaaS returns `page.blocks`. Mutually exclusive
+     *   with `bodyHtml` in practice (a single SaaS deployment returns
+     *   one or the other, not both).
+     *
      * @param  ?array{title: ?string, metaDescription: ?string, ogTitle: ?string, ogDescription: ?string, ogImageUrl: ?string, canonicalUrl: ?string}  $seo
      *   v0.11.0+ — server-resolved SEO meta for the published page.
      *   Same shape as AeoResponse->seo (SeoMeta), so the customer can
@@ -36,18 +53,25 @@ final class CmsPage
         public readonly ?string $slug = null,
         public readonly ?string $title = null,
         public readonly ?string $bodyHtml = null,
+        public readonly ?array $blocks = null,
         public readonly ?string $publishedAt = null,
         public readonly ?array $seo = null,
     ) {
     }
 
     /**
-     * Build a ready CmsPage from the SaaS payload + already-rendered HTML.
+     * Build a ready CmsPage from the SaaS payload. Exactly one of
+     * `$bodyHtml` (legacy Tiptap path) or `$blocks` (substrate v2 path)
+     * should be passed.
      *
-     * @param  array<string, mixed>  $payload  shape: { status, page: { slug, title, body, publishedAt } }
+     * @param  array<string, mixed>  $payload  shape: { status, page: { slug, title, body|blocks, publishedAt }, seo? }
+     * @param  ?list<array<string, mixed>>  $blocks
      */
-    public static function fromArray(array $payload, string $bodyHtml): self
-    {
+    public static function fromArray(
+        array $payload,
+        ?string $bodyHtml = null,
+        ?array $blocks = null,
+    ): self {
         $status = (string) ($payload['status'] ?? self::STATUS_NOT_FOUND);
         $page = $payload['page'] ?? null;
 
@@ -73,6 +97,7 @@ final class CmsPage
             slug: isset($page['slug']) ? (string) $page['slug'] : null,
             title: isset($page['title']) ? (string) $page['title'] : null,
             bodyHtml: $bodyHtml,
+            blocks: $blocks,
             publishedAt: isset($page['publishedAt']) && is_string($page['publishedAt'])
                 ? $page['publishedAt']
                 : null,
@@ -110,6 +135,7 @@ final class CmsPage
             'slug' => $this->slug,
             'title' => $this->title,
             'bodyHtml' => $this->bodyHtml,
+            'blocks' => $this->blocks,
             'publishedAt' => $this->publishedAt,
             'seo' => $this->seo,
         ];
