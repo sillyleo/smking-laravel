@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.15.1 — Carousel polish in canonical CSS (2026-05-23)
+
+**Patch — carousel nav buttons / dots indicator / image-frame / caption-row + download icon shipped in canonical CSS source, so Mode A customers automatically get the full Apple-newsroom-style carousel chrome.**
+
+### Added
+
+- `cms-styles.blade.php` (auto-regenerated from `packages/shared/src/styles/cms-styles.css`) now carries the full carousel polish: container-query-anchored nav buttons, per-slide image-frame with placeholder state, caption-row with download icon, dots indicator with active state.
+- Container-query (`container-type: inline-size`) on `<smking-carousel>` keeps nav buttons vertically centred on the image regardless of which aspect ratio (`16:9` / `4:3` / `1:1` / `3:4` / `9:16`) the editor picked.
+
+### Tested
+
+- Phpunit suite 171/171 green on testbench Laravel 12.
+- Canonical CSS sha matches Next SDK output (`pnpm sync:cms-styles` verifies byte-identical).
+
+### Customer
+
+```bash
+composer update smking/laravel       # → v0.15.1
+php artisan view:clear
+```
+
+No code change needed. Existing `<x-smking-cms />` Mode A renders pick up the carousel polish on the next view-cache clear.
+
 ## v0.15.0 — Single-source canonical CSS + theme mode toggle (2026-05-23)
 
 **Companion to `@soloworks/smking-next` 0.14.0 and `@soloworks/smking-wizard` 0.4.0.** `<x-smking-cms />` now ships its own polished default styles by default — no customer CSS work needed. Customers who already use Tailwind + `@tailwindcss/typography` can flip to a prose-utility markup variant via `SMKING_CMS_THEME=tailwind-prose` (the wizard auto-detects and offers the option).

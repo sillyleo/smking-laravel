@@ -2,7 +2,7 @@
   AUTO-GENERATED - do not edit by hand.
   Source:  packages/shared/src/styles/cms-styles.css
   Sync:    pnpm sync:cms-styles
-  Hash:    bf93aa1f4b52
+  Hash:    f555c5fed446
 
   Included by smking::cms (cms.blade.php) when
   config('smking.cms.theme_mode') === 'css' (the default, Mode A).
@@ -493,70 +493,205 @@
   }
 
   /* ============================================================
-     Carousel — `data-aspect` token-driven aspect-ratio
-     SDK emits: `<section class="smk-block smk-block--carousel smk-carousel"
-                            data-aspect="16:9|4:3|1:1|3:4|9:16">`
-     5 aspect ratio variants — picked by the editor's settings popover,
-     written into props.aspectRatio, surfaced as data-aspect attr by
-     SDK render. All variant CSS lives below — image / slide both consume
-     the same --smk-carousel-aspect token.
+     Carousel — Apple-newsroom style horizontal carousel with
+     `data-aspect` token-driven aspect-ratio, container-query-anchored
+     nav buttons, and dots indicator.
+     SDK emits:
+       <smking-carousel class="smk-block smk-block--carousel smk-carousel"
+                        data-aspect="16:9|4:3|1:1|3:4|9:16">
+         <div class="smk-carousel__viewport">
+           <smking-slide>
+             <div class="smk-carousel__image-frame">
+               <img class="smk-carousel__image" /> or .__image--placeholder
+             </div>
+             <div class="smk-carousel__caption-row">
+               <div class="smk-carousel__caption">…</div>
+               <a class="smk-carousel__download" href />
+             </div>
+           </smking-slide>
+         </div>
+         <button class="smk-carousel__nav-prev|next" />
+         <div class="smk-carousel__dots">
+           <button class="smk-carousel__dot" aria-current="true|false" />
+         </div>
+       </smking-carousel>
+
+     Web Component IIFE (SMKING_ELEMENTS_IIFE) upgrades the markup with
+     swipe / scroll-snap / dot-binding behaviour client-side. CSS below
+     drives all visual state — image cover-fill, nav-button vertical
+     centering anchored to image height (cqw container-queries), dot
+     active state.
      ============================================================ */
+  smking-carousel,
   .smk-carousel {
+    display: block;
+    position: relative;
     margin: 2.5rem 0;
+    padding-top: 2.5rem;              /* room for editor settings overlay; harmless on customer side */
+    padding-bottom: 1.5rem;
+    container-type: inline-size;      /* enables `cqw` for nav-button vertical anchor */
     --smk-carousel-aspect: 16 / 9;
+    --smk-carousel-nav-top: 28.125cqw;   /* 50cqw × 9/16 = half of image height */
   }
-  .smk-carousel[data-aspect="4:3"] {
+  .smk-carousel[data-aspect="4:3"],
+  smking-carousel[data-aspect="4:3"] {
     --smk-carousel-aspect: 4 / 3;
+    --smk-carousel-nav-top: 37.5cqw;
   }
-  .smk-carousel[data-aspect="1:1"] {
+  .smk-carousel[data-aspect="1:1"],
+  smking-carousel[data-aspect="1:1"] {
     --smk-carousel-aspect: 1 / 1;
+    --smk-carousel-nav-top: 50cqw;
   }
-  .smk-carousel[data-aspect="3:4"] {
+  .smk-carousel[data-aspect="3:4"],
+  smking-carousel[data-aspect="3:4"] {
     --smk-carousel-aspect: 3 / 4;
+    --smk-carousel-nav-top: 66.667cqw;
   }
-  .smk-carousel[data-aspect="9:16"] {
+  .smk-carousel[data-aspect="9:16"],
+  smking-carousel[data-aspect="9:16"] {
     --smk-carousel-aspect: 9 / 16;
+    --smk-carousel-nav-top: 88.889cqw;
   }
+
   .smk-carousel__viewport {
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: 80%;
-    gap: 1rem;
+    display: flex;
     overflow-x: auto;
     scroll-snap-type: x mandatory;
+    scroll-behavior: smooth;
+    scrollbar-width: none;
     -webkit-overflow-scrolling: touch;
-    padding-bottom: 0.5rem;
-    margin-inline: -1.5rem;
-    padding-inline: 1.5rem;
-  }
-  @media (min-width: 640px) {
-    .smk-carousel__viewport {
-      grid-auto-columns: 60%;
-    }
   }
   .smk-carousel__viewport::-webkit-scrollbar {
-    height: 6px;
+    display: none;
   }
-  .smk-carousel__viewport::-webkit-scrollbar-thumb {
-    background: var(--smk-border-strong);
-    border-radius: 3px;
-  }
+
+  smking-slide,
   .smk-carousel__slide {
+    display: flex;
+    flex-direction: column;
+    flex: 0 0 100%;
     scroll-snap-align: start;
-    background: var(--smk-bg-soft);
-    border-radius: var(--smk-radius-md);
+    min-width: 0;
+    padding-inline: 0.5rem;
+    gap: 1rem;
+  }
+
+  /* Image frame — fixed-aspect box. Image cover-fills. */
+  .smk-carousel__image-frame {
+    position: relative;
+    aspect-ratio: var(--smk-carousel-aspect);
     overflow: hidden;
+    border-radius: var(--smk-radius-md);
   }
   .smk-carousel__image {
-    width: 100%;
-    aspect-ratio: var(--smk-carousel-aspect);
-    object-fit: cover;
     display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .smk-carousel__image--placeholder {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--smk-bg-soft);
+    border: 1px dashed var(--smk-border);
+  }
+
+  /* Caption row — text on the left, download icon on the right. Matches
+     Apple newsroom's per-slide attribution + asset-download pattern. */
+  .smk-carousel__caption-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding-inline: 0.25rem;
   }
   .smk-carousel__caption {
-    padding: 0.75rem 1rem;
+    flex: 1;
+    text-align: center;
     font-size: 0.875rem;
     color: var(--smk-fg-muted);
+    line-height: 1.5;
+  }
+  .smk-carousel__download {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 9999px;
+    color: var(--smk-fg-muted);
+    text-decoration: none;
+    transition: background-color 0.15s, color 0.15s;
+  }
+  .smk-carousel__download:hover {
+    background: var(--smk-bg-soft);
+    color: var(--smk-fg);
+  }
+
+  /* Nav buttons — circular cards overlapping the image edges. Top is
+     centered on the IMAGE (not the whole carousel) via container query:
+     image height = 100cqw × (ratio_h / ratio_w); half = nav-top var.
+     2.5rem offset = container padding-top. */
+  .smk-carousel__nav-prev,
+  .smk-carousel__nav-next {
+    position: absolute;
+    top: calc(2.5rem + var(--smk-carousel-nav-top));
+    transform: translateY(-50%);
+    z-index: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    padding: 0;
+    border-radius: 9999px;
+    border: 1px solid var(--smk-border);
+    background: var(--smk-bg);
+    color: var(--smk-fg);
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.06);
+    transition: background-color 0.15s, transform 0.15s;
+  }
+  .smk-carousel__nav-prev { left: 0.75rem; }
+  .smk-carousel__nav-next { right: 0.75rem; }
+  .smk-carousel__nav-prev:hover,
+  .smk-carousel__nav-next:hover {
+    background: var(--smk-bg-soft);
+  }
+  .smk-carousel__nav-prev:active,
+  .smk-carousel__nav-next:active {
+    transform: translateY(-50%) scale(0.95);
+  }
+
+  /* Dots — small circles centered below the caption row. Inactive is
+     hairline grey, active fills with foreground colour. */
+  .smk-carousel__dots {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+  }
+  .smk-carousel__dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    padding: 0;
+    border-radius: 9999px;
+    border: none;
+    background: color-mix(in srgb, var(--smk-fg) 20%, transparent);
+    cursor: pointer;
+    transition: background-color 0.15s, transform 0.15s;
+  }
+  .smk-carousel__dot:hover {
+    background: color-mix(in srgb, var(--smk-fg) 45%, transparent);
+  }
+  .smk-carousel__dot[aria-current="true"] {
+    background: var(--smk-fg);
+    transform: scale(1.1);
   }
 
   /* ============================================================
