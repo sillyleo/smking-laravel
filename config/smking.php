@@ -303,6 +303,33 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | CMS view defaults (v0.14.0+)
+    |--------------------------------------------------------------------------
+    |
+    | `theme_mode` (v0.15.0+) — selects the markup + styling strategy:
+    |   - 'css' (default, Mode A): SDK emits inline `<style data-smking=
+    |     "cms-styles">` from canonical source + `.smk-cms` + `.smk-block--*`
+    |     namespaced class hooks. Customer themes via CSS variables on
+    |     `:root` (`--smk-accent`, `--smk-font-serif`, etc).
+    |   - 'tailwind-prose' (Mode B): SDK skips the inline stylesheet,
+    |     wraps the article in `<article class="prose dark:prose-invert">`
+    |     and emits Tailwind utility classes on each block. Requires
+    |     customer to have `@tailwindcss/typography` plugin wired up
+    |     and the SDK utility classes safelisted (the wizard does this
+    |     on install).
+    |
+    | `inline_styles` (legacy) — only consulted when `theme_mode === 'css'`.
+    | Set to false if you ship your own CSS file instead of letting the
+    | SDK inline its defaults. Mode B ignores this flag entirely.
+    |
+    */
+    'cms' => [
+        'theme_mode' => env('SMKING_CMS_THEME', 'css'),
+        'inline_styles' => env('SMKING_CMS_INLINE_STYLES', true),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | HTTP Client (connect / read split since v0.7.0)
     |--------------------------------------------------------------------------
     |
