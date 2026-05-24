@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.17.0 — Raw passthrough render (2026-05-24)
+
+**Companion release to `@soloworks/smking-next` v0.16.0.** `<x-smking-cms>` now echoes the full Plate-serialized bodyHtml exactly — no `<article class="smk-cms">` shell, no `@include('smking::cms-styles')` auto-include.
+
+### What changed
+
+SaaS publish pipeline now calls Plate's stock `serializeHtml(editor)` with no options. bodyHtml carries the full class chain (Tailwind utility from dashboard cva variants + `slate-*` hook classes + `data-slate-*` attrs). The Blade component mirrors that posture — drop the wrapper, drop the cms-styles include.
+
+### Removed (breaking)
+
+- **`<article class="smk-cms">` shell** — replaced with `<div data-smking="cms">`. Customer Blade templates that styled `.smk-cms` directly need to re-apply layout themselves.
+- **`@include('smking::cms-styles')` auto-include** — gone. Customer sites can still include the partial manually if they want the canonical block CSS, but it's no longer wired into `<x-smking-cms>` by default.
+- **`config('smking.cms.inline_styles')`** — config flag becomes a no-op (kept for back-compat read, but value ignored by the Blade).
+- **Legacy `is_array($cms->blocks)` dispatch branch** — removed. Pages still on the pre-v0.16 block shape will not render until the SaaS re-publishes them.
+
+### Why
+
+Dashboard now publishes the same Plate output the Edit canvas renders. Wrapping that markup in a separate "customer article shell" with its own typography tokens broke the WYSIWYG promise. Raw passthrough makes the contract unambiguous: bodyHtml is the source of truth, customer Blade owns layout.
+
+### Migration
+
+If your Blade layout relied on `.smk-cms` or the cms-styles include, replicate them in your own template before bumping — pull in `@include('smking::cms-styles')` then wrap `<x-smking-cms>` inside your own `<article class="smk-cms">`. Composer 0.x caret rule: `^0.16` resolves to `>=0.16.0 <0.17.0` — you must edit `composer.json` to `"smking/laravel": "^0.17"` before `composer update`.
+
 ## v0.16.0 — `<x-smking-cms>` consumes Plate-serialized HTML directly (2026-05-24)
 
 **Customer Mode A 渲染 = Preview tab byte-identical.** Companion to `@soloworks/smking-next` v0.15.0 and `@soloworks/smking-wizard` v0.5.0.
