@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.16.0 — `<x-smking-cms>` consumes Plate-serialized HTML directly (2026-05-24)
+
+**Customer Mode A 渲染 = Preview tab byte-identical.** Companion to `@soloworks/smking-next` v0.15.0 and `@soloworks/smking-wizard` v0.5.0.
+
+### Architecture
+
+SaaS publish handler now runs Plate's `serializeHtml` over the full page (with nav-* snapshots injected) and ships the result as `page.bodyHtml`. `<x-smking-cms />` echoes that HTML inside the canonical `.smk-cms` wrapper — no per-block Blade partial dispatch when bodyHtml is present. The dashboard's Preview tab runs the same Plate plugin chain client-side, so editor preview = customer site, byte-for-byte.
+
+### Removed (breaking)
+
+- **`SMKING_CMS_THEME` env var + `config('smking.cms.theme_mode')`** — Mode B (`tailwind-prose`) dropped. Customers wanting Tailwind Typography wrap can put `<article class="prose dark:prose-invert">` around `<x-smking-cms />` themselves.
+- **`resources/views/block-prose.blade.php`** — deleted (Mode B markup template).
+- **Mode B branch in `cms.blade.php`** — removed; always emits canonical `<article class="smk-cms">` wrapper now.
+
+### Changed
+
+- `cms.blade.php` prefers `$cms->bodyHtml` (v0.16+ canonical path); falls back to `$cms->blocks` Block[] dispatch (v0.14-v0.15 SaaS deployments); falls back to legacy `$cms->bodyHtml` from Tiptap (pre-pivot SaaS).
+- `CmsClient::fetch` parses `page.bodyHtml` from the API response when present.
+- `config/smking.php` — `cms.theme_mode` key removed; `cms.inline_styles` flag kept (controls whether SDK emits `<style data-smking="cms-styles">`).
+
+### Tested
+
+- Phpunit suite 171/171 green on testbench Laravel 12.
+
+### Customer migration
+
+```bash
+composer update smking/laravel       # → v0.16.0
+php artisan view:clear
+```
+
+If your `.env` had `SMKING_CMS_THEME=tailwind-prose`, it's now ignored. The SDK ships canonical CSS by default. To use Tailwind Typography, wrap the component:
+
+```blade
+<article class="prose dark:prose-invert mx-auto">
+  <x-smking-cms slug="..." />
+</article>
+```
+
+Or run `config('smking.cms.inline_styles', false)` to disable the SDK stylesheet entirely if Tailwind handles all styling.
+
 ## v0.15.1 — Carousel polish in canonical CSS (2026-05-23)
 
 **Patch — carousel nav buttons / dots indicator / image-frame / caption-row + download icon shipped in canonical CSS source, so Mode A customers automatically get the full Apple-newsroom-style carousel chrome.**

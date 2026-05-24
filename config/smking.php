@@ -303,28 +303,23 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | CMS view defaults (v0.14.0+)
+    | CMS view defaults (v0.16.0+)
     |--------------------------------------------------------------------------
     |
-    | `theme_mode` (v0.15.0+) — selects the markup + styling strategy:
-    |   - 'css' (default, Mode A): SDK emits inline `<style data-smking=
-    |     "cms-styles">` from canonical source + `.smk-cms` + `.smk-block--*`
-    |     namespaced class hooks. Customer themes via CSS variables on
-    |     `:root` (`--smk-accent`, `--smk-font-serif`, etc).
-    |   - 'tailwind-prose' (Mode B): SDK skips the inline stylesheet,
-    |     wraps the article in `<article class="prose dark:prose-invert">`
-    |     and emits Tailwind utility classes on each block. Requires
-    |     customer to have `@tailwindcss/typography` plugin wired up
-    |     and the SDK utility classes safelisted (the wizard does this
-    |     on install).
+    | v0.16.0 removed the `theme_mode` Mode B (`tailwind-prose`) variant
+    | in favour of the canonical Plate-serialized HTML render that the
+    | SaaS publish handler now ships. Customers wanting Tailwind
+    | Typography styling can put a `<article class="prose">` wrapper
+    | around `<x-smking-cms />` themselves — `@tailwindcss/typography`
+    | will style the emitted `<h2>` / `<p>` / `<ul>` etc as normal.
     |
-    | `inline_styles` (legacy) — only consulted when `theme_mode === 'css'`.
-    | Set to false if you ship your own CSS file instead of letting the
-    | SDK inline its defaults. Mode B ignores this flag entirely.
+    | `inline_styles` — set to false if you ship your own CSS file
+    | instead of letting the SDK inline its canonical default. The
+    | `<x-smking-cms />` component still emits the `.smk-cms` wrapper
+    | so customer CSS can target the same class hooks.
     |
     */
     'cms' => [
-        'theme_mode' => env('SMKING_CMS_THEME', 'css'),
         'inline_styles' => env('SMKING_CMS_INLINE_STYLES', true),
     ],
 

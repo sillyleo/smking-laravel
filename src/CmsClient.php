@@ -95,18 +95,25 @@ class CmsClient
             return CmsPage::notFound();
         }
 
-        // v0.14.0+ substrate v2: SaaS public API returns `page.blocks`
-        // (Block[]) instead of the legacy `page.body` (Tiptap ProseMirror
-        // JSON). We accept both — `blocks` wins when present so customer
-        // SDKs see new substrate output; `body` is kept as a fallback so
-        // an older SaaS deployment (pre-pivot) doesn't break the SDK.
+        // v0.16+ canonical render path — SaaS publish handler runs
+        // Plate `serializeHtml` over the whole page (with nav-*
+        // snapshots injected) and ships the result as `page.bodyHtml`.
+        // The view echoes it directly inside the .smk-cms wrapper.
+        if (isset($page['bodyHtml']) && is_string($page['bodyHtml']) && $page['bodyHtml'] !== '') {
+            return CmsPage::fromArray($payload, bodyHtml: $page['bodyHtml']);
+        }
+
+        // v0.14.x legacy path — SaaS pre-v0.16 returns `page.blocks`
+        // (Block[]). cms.blade.php dispatches via the per-component
+        // partial. Will sunset after the v0.16 SaaS deployment is
+        // fully rolled out + customer pages republished.
         if (isset($page['blocks']) && is_array($page['blocks'])) {
             return CmsPage::fromArray($payload, blocks: $page['blocks']);
         }
 
+        // Pre-pivot Tiptap path — kept for very old SaaS deployments
+        // that haven't migrated to Plate yet.
         if (isset($page['body'])) {
-            // Legacy path — Tiptap ProseMirror JSON. EditorFactory
-            // renders it server-side; malformed docs come back as ''.
             $bodyHtml = $this->editor->renderHtml($page['body']);
             return CmsPage::fromArray($payload, bodyHtml: $bodyHtml);
         }
