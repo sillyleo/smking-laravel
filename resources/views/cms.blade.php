@@ -1,14 +1,9 @@
 @if($cms->isReady())
-    @php
-        $_smkingThemeMode = config('smking.cms.theme_mode', 'css');
-        $_smkingIsModeB = $_smkingThemeMode === 'tailwind-prose';
-    @endphp
-
-    {{-- Mode A only: inline canonical CSS so customer pages render styled
-         without any stylesheet wiring. Mode B opts in to Tailwind +
-         @tailwindcss/typography and skips this. The legacy
-         `inline_styles` flag stays gated on Mode A. --}}
-    @if(! $_smkingIsModeB && (bool) config('smking.cms.inline_styles', true))
+    {{-- v0.16+ canonical CSS — Mode A is the only supported mode
+         (Mode B / `tailwind-prose` removed in v0.16). Customer who
+         wants Tailwind typography wrap can put a `<article class="prose">`
+         around `<x-smking-cms>` themselves. --}}
+    @if((bool) config('smking.cms.inline_styles', true))
         @include('smking::cms-styles')
     @endif
 
@@ -42,38 +37,24 @@
         @endif
     @endif
 
-    @if($_smkingIsModeB)
-        {{-- Mode B: customer's @tailwindcss/typography plugin styles
-             the article. `not-prose` markers inside each block-prose
-             partial reset prose styling around structured blocks
-             (hero / nav / carousel / search). --}}
-        <article class="prose lg:prose-xl dark:prose-invert mx-auto" data-smking="cms">
-            @if($cms->title)
-                <h1>{{ $cms->title }}</h1>
-            @endif
-            @if(is_array($cms->blocks))
-                @foreach($cms->blocks as $_smkingBlock)
-                    @include('smking::block-prose', ['block' => $_smkingBlock])
-                @endforeach
-            @elseif($cms->bodyHtml)
-                {!! $cms->bodyHtml !!}
-            @endif
+    @if(! empty($cms->bodyHtml))
+        {{-- v0.16+ canonical path — SaaS publish handler ran Plate's
+             `serializeHtml` on the full page (with nav-* snapshots
+             injected) and ships the result. We echo it inside the
+             canonical `.smk-cms` wrapper. --}}
+        <article class="smk-cms" data-smking="cms">
+            {!! $cms->bodyHtml !!}
         </article>
-    @else
+    @elseif(is_array($cms->blocks))
+        {{-- Legacy fallback — SaaS pre-v0.16 returns `blocks` only.
+             Dispatch each block via the per-component partial. --}}
         <article class="smk-cms" data-smking="cms">
             @if($cms->title)
                 <h1 class="smk-cms__title">{{ $cms->title }}</h1>
             @endif
-            {{-- v0.14.0+ substrate v2: `$cms->blocks` is the canonical
-                 render path (Block[] dispatched component-by-component).
-                 Legacy pre-pivot SaaS deployments fall back to `bodyHtml`. --}}
-            @if(is_array($cms->blocks))
-                @foreach($cms->blocks as $_smkingBlock)
-                    @include('smking::block', ['block' => $_smkingBlock])
-                @endforeach
-            @elseif($cms->bodyHtml)
-                {!! $cms->bodyHtml !!}
-            @endif
+            @foreach($cms->blocks as $_smkingBlock)
+                @include('smking::block', ['block' => $_smkingBlock])
+            @endforeach
         </article>
     @endif
 @endif
