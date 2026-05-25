@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.17.1 — `<x-smking-runtime>` Blade component (2026-05-25)
+
+**Companion release to `@soloworks/smking-next` v0.16.1.** New `<x-smking-runtime />` Blade component — one-time mount in customer Blade root layout to load saas-served CSS + Web Component runtime JS.
+
+### Added
+
+- `<x-smking-runtime />` Blade component. Place in your root layout `<head>` once; emits `<link>` + `<script async>` pointing at `/api/v1/public/runtime.{css,js}` on the saas.
+- Optional `:base-url="..."` attribute overrides `config('smking.base_url')`. Trailing slash is trimmed.
+
+### Why
+
+Same propagation gap as the Next SDK companion: bodyHtml from SaaS publish carries Tailwind utility classes that customer Blade renders as dead strings without a stylesheet defining them. `<x-smking-runtime>` solves that and prepares for cross-platform Web Component runtime (carousel, search, etc.) that the SaaS keeps shipping fresh without forcing SDK bumps.
+
+### Migration
+
+Add one line to your root Blade layout (typically `resources/views/layouts/app.blade.php`):
+
+```blade
+<head>
+    ...
+    <x-smking-runtime />
+</head>
+```
+
+Patch bump — no breaking changes. `composer require smking/laravel:^0.17` already resolves to this release; no constraint bump needed.
+
 ## v0.17.0 — Raw passthrough render (2026-05-24)
 
 **Companion release to `@soloworks/smking-next` v0.16.0.** `<x-smking-cms>` now echoes the full Plate-serialized bodyHtml exactly — no `<article class="smk-cms">` shell, no `@include('smking::cms-styles')` auto-include.
