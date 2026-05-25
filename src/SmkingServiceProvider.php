@@ -21,6 +21,7 @@ use Smking\Laravel\Tiptap\EditorFactory;
 use Smking\Laravel\View\Components\Aeo as AeoComponent;
 use Smking\Laravel\View\Components\Cms as CmsComponent;
 use Smking\Laravel\View\Components\Meta as MetaComponent;
+use Smking\Laravel\View\Components\Runtime as RuntimeComponent;
 
 class SmkingServiceProvider extends ServiceProvider
 {
@@ -77,6 +78,7 @@ class SmkingServiceProvider extends ServiceProvider
             'aeo' => AeoComponent::class,
             'cms' => CmsComponent::class,
             'meta' => MetaComponent::class,
+            'runtime' => RuntimeComponent::class,
         ]);
 
         $this->registerMiddleware();
