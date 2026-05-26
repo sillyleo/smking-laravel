@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.18.1 — Service-provider auto-mount for takeover routes (2026-05-26)
+
+**Customer `composer require` now produces a working `/sitemap.xml` and `/llms.txt` immediately — no route-file edits, no wizard run required.**
+
+### Fixed
+
+- `/sitemap.xml` and `/llms.txt` routes are now registered by `SmkingServiceProvider::registerRoutes()` via `routes/takeover.php`. Pre-0.18.1 these controllers existed but no route mounted them — customers had to rely on smking-wizard writing `Route::get(...)` into their `routes/web.php`, which silently broke when the wizard stopped early (verified on www-dev.sleepytofu.com where wizard exited after OAuth without writing routes).
+
+### Added
+
+- `config/smking.php` `takeover.sitemap` / `takeover.llms_txt` flags (default `true`, env overrides `SMKING_TAKEOVER_SITEMAP` / `SMKING_TAKEOVER_LLMS_TXT`). Set either to `false` if the customer's app owns `/sitemap.xml` or `/llms.txt` and shouldn't be overridden.
+- `routes/takeover.php` — standalone route file. Customers using `php artisan route:cache` (production mode) still need the wizard to insert `require base_path('vendor/smking/laravel/routes/takeover.php')` into `routes/web.php`, mirroring the dual-mount pattern already used for the webhook route.
+
+### Dual-mount semantics (matches webhook v0.13)
+
+- **Dev / no route cache**: service provider auto-mounts on boot. Customer does nothing.
+- **Production / `route:cache`**: provider auto-mount is skipped (Laravel doesn't re-run `boot()` after the route cache is built). Wizard `require` in customer route files covers this. Double-registration is idempotent (Laravel dedupes by name + method + URI).
+
+### Migration
+
+`composer update smking/laravel`. No code changes needed; routes appear automatically. To verify:
+
+```bash
+php artisan route:list --name=smking
+# Expected: smking.sitemap, smking.llms_txt, smking.webhook
+```
+
+Customer opt-out for any takeover path:
+
+```php
+// config/smking.php
+'takeover' => [
+    'sitemap' => false,  // keep my own /sitemap.xml route
+    'llms_txt' => true,
+],
+```
+
+Patch bump — backward-compatible bugfix. `composer require smking/laravel:^0.18` consumers automatically receive this; no constraint change needed.
+
 ## v0.18.0 — SDK self-report heartbeat (2026-05-26)
 
 **Dashboard SDK Health chip stops getting WAF false-negatives. Companion release to `@soloworks/smking-next` v0.17.0.**
