@@ -39,6 +39,34 @@ class AeoClientTest extends TestCase
         });
     }
 
+    public function test_post_body_includes_sdk_meta_heartbeat(): void
+    {
+        // Heartbeat piggyback (v0.18+): every AEO POST emits sdk_meta so
+        // saas can upsert sdk_health_snapshots without an outbound probe
+        // (Cloudflare WAFs commonly block Vercel ASN egress).
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response(['status' => 'not_found'], 404),
+        ]);
+
+        /** @var AeoClient $client */
+        $client = $this->app->make(AeoClient::class);
+        $client->forPath('/p/1', 'https://shop.example/p/1');
+
+        Http::assertSent(function ($request) {
+            $body = $request->data();
+            $meta = $body['sdk_meta'] ?? null;
+
+            $this->assertIsArray($meta, 'sdk_meta should be array, got: ' . var_export($meta, true));
+            $this->assertSame('laravel', $meta['sdk']);
+            $this->assertNotEmpty($meta['sdk_version']);
+            // host is null when no HTTP request scope is bound (unit-test default)
+            $this->assertArrayHasKey('host', $meta);
+            $this->assertArrayHasKey('app_env', $meta);
+
+            return true;
+        });
+    }
+
     public function test_202_returns_pending(): void
     {
         Http::fake([

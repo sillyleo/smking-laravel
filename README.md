@@ -57,6 +57,29 @@ Disable auto-injection and render where you want:
 
 The `<x-smking-meta />` component mirrors `getSmkingMetadata()` from `@smking/next` — call it inside `<head>` and it emits exactly the SEO tags the API has values for, falling back to the `fallback-*` props otherwise. Use it when you want SEO meta in your Blade layout but body injection from the middleware.
 
+## Mount the runtime once (v0.17.1+)
+
+Add `<x-smking-runtime />` once in your root Blade layout `<head>` — it emits a `<link>` to the saas-served CSS and a `<script async>` to the bundled Web Component runtime IIFE. Browser caches both per saas-controlled stale-while-revalidate headers, so the cost amortises across every `<x-smking-cms>` instance on the page.
+
+```blade
+{{-- resources/views/layouts/app.blade.php --}}
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{{ config('app.name') }}</title>
+    <x-smking-runtime />
+</head>
+<body>
+    @yield('content')
+</body>
+</html>
+```
+
+Optional `:base-url="..."` attribute overrides `config('smking.base_url')`. Trailing slash is trimmed.
+
+Without `<x-smking-runtime />`, `<x-smking-cms>` content still renders but the Tailwind utility classes from the dashboard's cva variants resolve to dead strings — the page reaches the browser unstyled. The wizard installer auto-adds this mount; if you're upgrading manually from < v0.17.1, add the one line above.
+
 ## CMS rendering (optional, v0.11.0+)
 
 The base install above only wires AEO. If you author content in the smking dashboard's CMS and want to render it on your Laravel site, use the `<x-smking-cms slug="…" />` Blade component.
