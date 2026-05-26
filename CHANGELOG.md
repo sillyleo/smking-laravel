@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.18.0 — SDK self-report heartbeat (2026-05-26)
+
+**Dashboard SDK Health chip stops getting WAF false-negatives. Companion release to `@soloworks/smking-next` v0.17.0.**
+
+### Added
+
+- Every `AeoClient::forPath()` POST now piggybacks an `sdk_meta` field on the request body so saas can upsert `sdk_health_snapshots` with `source='sdk_heartbeat'`. The dashboard "SDK Health" chip reads this signal as primary, falling back to active probe only when fresh (<24h) heartbeat is absent.
+- Payload shape: `{ sdk: 'laravel', sdk_version, app_env, host }`. Version pulled from `Composer\InstalledVersions`; host defensively pulled from `request()->getHttpHost()` (null when no HTTP request scope is bound, e.g. queue / artisan).
+
+### Why
+
+Customer Cloudflare WAFs commonly block saas's Vercel ASN egress (Vercel + Googlebot UA = reverse-DNS mismatch → 403 reject). Active probe from saas → customer site reliably fails on protected sites like sleepytofu.com even when SDK is fully operational. SDK-initiated heartbeat bypasses the WAF because the customer site is the originator — saas never needs to fetch back.
+
+### Migration
+
+No customer action required. Update with `composer update smking/laravel` and the dashboard chip updates on the next AEO POST your app emits.
+
+Minor bump — backward-compatible feature. Composer 0.x caret rule: `^0.17` consumers must update their constraint to `^0.18` to receive this release. `composer require smking/laravel:^0.18` will pull it once published.
+
 ## v0.17.1 — `<x-smking-runtime>` Blade component (2026-05-25)
 
 **Companion release to `@soloworks/smking-next` v0.16.1.** New `<x-smking-runtime />` Blade component — one-time mount in customer Blade root layout to load saas-served CSS + Web Component runtime JS.

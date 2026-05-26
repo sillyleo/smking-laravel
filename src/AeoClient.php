@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Smking\Laravel;
 
+use Composer\InstalledVersions;
 use Illuminate\Contracts\Cache\Factory as CacheFactory;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Http\Client\Factory as HttpFactory;
@@ -270,7 +271,17 @@ class AeoClient
         }
 
         $payload = array_filter(
-            array_merge(['key' => $apiKey], $body),
+            array_merge(
+                [
+                    'key' => $apiKey,
+                    // Heartbeat piggyback — saas upserts sdk_health_snapshots
+                    // so dashboard shows 'SDK active' without an outbound probe
+                    // (which Cloudflare WAFs commonly block on Vercel ASN).
+                    // Older saas silently ignores this optional field.
+                    'sdk_meta' => $this->selfReport(),
+                ],
+                $body,
+            ),
             static fn ($value) => $value !== null && $value !== '',
         );
 
@@ -855,6 +866,50 @@ class AeoClient
         $value = $this->config->get('smking.base_url');
 
         return is_string($value) && $value !== '' ? rtrim($value, '/') : null;
+    }
+
+    /**
+     * SDK self-report metadata piggybacked on every AEO POST. Saas uses this
+     * to upsert {@see sdk_health_snapshots} with source='sdk_heartbeat' so
+     * the dashboard can show "SDK active (last seen Nm ago)" without an
+     * outbound probe — necessary because customer Cloudflare WAFs routinely
+     * block saas's Vercel ASN egress.
+     *
+     * All fields are nullable on the saas side. Host pull is defensive
+     * (`request()` is not bound in queue workers / artisan commands), and
+     * `InstalledVersions::isInstalled` check covers the rare case where
+     * Composer's runtime API is unavailable (e.g. raw script include).
+     */
+    private function selfReport(): array
+    {
+        return [
+            'sdk' => 'laravel',
+            'sdk_version' => InstalledVersions::isInstalled('smking/laravel')
+                ? InstalledVersions::getVersion('smking/laravel')
+                : null,
+            'app_env' => is_string($env = $this->config->get('app.env')) ? $env : null,
+            'host' => $this->safeHost(),
+        ];
+    }
+
+    /**
+     * Best-effort HTTP host extraction. Returns null when no request scope
+     * is bound (queue / artisan / tests without HTTP mock).
+     */
+    private function safeHost(): ?string
+    {
+        try {
+            if (function_exists('request')) {
+                $req = request();
+                if ($req !== null) {
+                    return $req->getHttpHost();
+                }
+            }
+        } catch (Throwable) {
+            // No request scope — fall through to null.
+        }
+
+        return null;
     }
 
     /**
