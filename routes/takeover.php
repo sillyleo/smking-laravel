@@ -33,12 +33,33 @@ use Smking\Laravel\Http\Controllers\SitemapController;
  * the customer's `public/robots.txt` so static file serving still works.
  */
 
+/*
+ * Namespace defence — array-callable form is required (v0.18.2 fix).
+ *
+ * `SitemapController::class` returns the string `Smking\Laravel\Http\Controllers\SitemapController`
+ * WITHOUT a leading backslash. Customers running Laravel ≤7-style scaffold
+ * (still common — framework upgrades don't rewrite RouteServiceProvider)
+ * have `protected $namespace = 'App\Http\Controllers'` + `->namespace($this->namespace)`
+ * on the web group, which concatenates that prefix onto the unprefixed
+ * string and resolves to the bogus
+ * `App\Http\Controllers\Smking\Laravel\Http\Controllers\SitemapController`.
+ * Every `php artisan` invocation then throws `UnexpectedValueException:
+ * Invalid route action` and the entire routes/web.php file 500s.
+ *
+ * The `[Class::class, '__invoke']` array-callable form resolves through
+ * Laravel's callable pipeline which skips the namespace-prefix step
+ * entirely. Same defence already shipped in routes/webhook.php since
+ * v0.13.0 — this file inherited the bug because I forgot to apply the
+ * same pattern when adding auto-mount in v0.18.1. Reproduced on
+ * www.sleepytofu.com 2026-05-26 (doctor ticket dr_000d44af8eb2).
+ */
+
 if ((bool) config('smking.takeover.sitemap', true)) {
-    Route::get('/sitemap.xml', SitemapController::class)
+    Route::get('/sitemap.xml', [SitemapController::class, '__invoke'])
         ->name('smking.sitemap');
 }
 
 if ((bool) config('smking.takeover.llms_txt', true)) {
-    Route::get('/llms.txt', LlmsTxtController::class)
+    Route::get('/llms.txt', [LlmsTxtController::class, '__invoke'])
         ->name('smking.llms_txt');
 }

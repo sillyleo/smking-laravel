@@ -50,6 +50,57 @@ class TakeoverRouteAutoMountTest extends TestCase
         $this->assertSame('llms.txt', $llmsRoute->uri());
     }
 
+    public function test_takeover_routes_use_array_callable_form_in_source(): void
+    {
+        // v0.18.2 regression test: customer Laravel apps with legacy
+        // RouteServiceProvider (protected $namespace = 'App\Http\Controllers'
+        // + ->namespace($this->namespace) on the web group) would prefix
+        // string controller refs and produce
+        // `App\Http\Controllers\Smking\Laravel\Http\Controllers\SitemapController`.
+        // The array-callable [Class::class, '__invoke'] form skips that path.
+        // Reproduced on www.sleepytofu.com 2026-05-26 (doctor ticket
+        // dr_000d44af8eb2). If this test fails because someone reverted to
+        // the bare ::class shorthand in routes/takeover.php, the entire
+        // routes/web.php will 500 on legacy customer Laravel apps.
+        //
+        // Source-level assertion because Laravel normalizes both forms
+        // (`Class::class` and `[Class::class, '__invoke']`) into the same
+        // 'Class@method' string in getAction()['uses'] — only the parsing
+        // path differs (the namespace-prefix step is only on the string-
+        // shorthand path), so we can't tell them apart at runtime via the
+        // route action API. Reading the source guarantees the dispatch path
+        // stays on the array-callable form.
+        $source = file_get_contents(__DIR__.'/../routes/takeover.php');
+
+        $this->assertStringContainsString(
+            "[SitemapController::class, '__invoke']",
+            $source,
+            'routes/takeover.php must declare sitemap as array-callable',
+        );
+        $this->assertStringContainsString(
+            "[LlmsTxtController::class, '__invoke']",
+            $source,
+            'routes/takeover.php must declare llms.txt as array-callable',
+        );
+
+        // Anti-assertion: bare `SitemapController::class` (single-class
+        // shorthand) must NOT appear as a Route::get second-arg. We
+        // intentionally allow the bare form INSIDE the array literal
+        // ([SitemapController::class, ...]) — that's the correct form —
+        // so we look for the specific shape that would re-introduce the
+        // bug: "Route::get('/sitemap.xml', SitemapController::class)".
+        $this->assertDoesNotMatchRegularExpression(
+            '/Route::get\([^,]+,\s*SitemapController::class\s*\)/',
+            $source,
+            'sitemap route must not use bare ::class shorthand (legacy namespace prefix bug)',
+        );
+        $this->assertDoesNotMatchRegularExpression(
+            '/Route::get\([^,]+,\s*LlmsTxtController::class\s*\)/',
+            $source,
+            'llms.txt route must not use bare ::class shorthand (legacy namespace prefix bug)',
+        );
+    }
+
     public function test_sitemap_route_serves_saas_body_when_upstream_responds(): void
     {
         Http::fake([
