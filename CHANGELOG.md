@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.18.2 — Namespace defence on takeover routes (2026-05-26)
+
+**Critical fix for customers running legacy RouteServiceProvider (`protected $namespace = 'App\Http\Controllers'`) — without this, `routes/web.php` 500s entirely once the wizard requires `routes/takeover.php` from it.**
+
+### Fixed
+
+`routes/takeover.php` used the bare `SitemapController::class` shorthand:
+
+```php
+Route::get('/sitemap.xml', SitemapController::class)->name('smking.sitemap');
+```
+
+`SitemapController::class` returns the string `Smking\Laravel\Http\Controllers\SitemapController` WITHOUT a leading backslash. Laravel apps with legacy RouteServiceProvider patterns concatenate that with their controllers namespace, producing the bogus `App\Http\Controllers\Smking\Laravel\Http\Controllers\SitemapController` → `UnexpectedValueException: Invalid route action` → entire `routes/web.php` 500s on every artisan invocation.
+
+Webhook.php has been on the array-callable form since v0.13.0 to dodge this exact bug. Takeover.php inherited the issue when v0.18.1 added the auto-mount file because I forgot to apply the same defence. Reproduced on www.sleepytofu.com 2026-05-26 (doctor ticket dr_000d44af8eb2).
+
+### Fix
+
+```php
+Route::get('/sitemap.xml', [SitemapController::class, '__invoke'])
+    ->name('smking.sitemap');
+```
+
+The array-callable form resolves through Laravel's callable pipeline which skips the namespace-prefix step entirely. Works on Laravel 7 / 8+ / 9+ / 10+ / 11+ / 12+ / 13+.
+
+### Tests
+
+New regression test `TakeoverRouteAutoMountTest::test_takeover_routes_use_array_callable_form_in_source` does source-level assertion (Laravel normalises both forms to the same `'Class@method'` string in `getAction()['uses']` so runtime inspection can't distinguish them). Both positive (`[Class::class, '__invoke']` present) and anti-assertion (`Route::get(..., Class::class)` regex absent) included so reverting to the shorthand fails CI.
+
+### Migration
+
+`composer update smking/laravel` to receive v0.18.2. The next `php artisan` invocation will resolve cleanly. No code changes needed in customer routes/web.php — `require base_path('vendor/smking/laravel/routes/takeover.php')` line stays as-is.
+
 ## v0.18.1 — Service-provider auto-mount for takeover routes (2026-05-26)
 
 **Customer `composer require` now produces a working `/sitemap.xml` and `/llms.txt` immediately — no route-file edits, no wizard run required.**
