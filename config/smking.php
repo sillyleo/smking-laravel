@@ -407,9 +407,38 @@ return [
         'content_signal' => 'search=yes, ai-input=no, ai-train=no',
     ],
 
-    // v0.13.0: removed `takeover` config block. Middleware no longer auto-
-    // serves /sitemap.xml /robots.txt /llms.txt. smking-wizard registers
-    // dedicated routes (SitemapController / LlmsTxtController) in customer's
-    // routes/web.php instead — Laravel idiomatic, debuggable via
-    // `php artisan route:list`, removes takeover-bypass bug class.
+    /*
+    |--------------------------------------------------------------------------
+    | Path takeover (v0.18.1+)
+    |--------------------------------------------------------------------------
+    |
+    | The service provider auto-mounts these GET routes when no `route:cache`
+    | file is present (typical local-dev / non-prod):
+    |   - GET /sitemap.xml → SitemapController (SaaS-served sitemap)
+    |   - GET /llms.txt    → LlmsTxtController (SaaS-served llms.txt)
+    |
+    | History:
+    |   v0.9 – v0.12  middleware auto-served these paths on customer 404.
+    |   v0.13         middleware takeover removed; controllers required
+    |                 wizard to write Route::get into customer routes/web.php
+    |                 (the wizard step that turned out to be unreliable —
+    |                 customer site stayed 404 if wizard stopped early).
+    |   v0.18.1       controllers auto-mounted by service provider via
+    |                 routes/takeover.php (Laravel package idiomatic;
+    |                 customer needs zero route-file edits). route:cache
+    |                 mode still requires the wizard to insert `require
+    |                 base_path('vendor/smking/laravel/routes/takeover.php')`
+    |                 into customer routes/web.php, mirroring the webhook
+    |                 mount pattern.
+    |
+    | Robots takeover is intentionally absent here — robots.txt is handled
+    | by `php artisan smking:publish-robots` which writes directives into
+    | the customer's public/robots.txt so static-file serving still works.
+    |
+    */
+
+    'takeover' => [
+        'sitemap' => env('SMKING_TAKEOVER_SITEMAP', true),
+        'llms_txt' => env('SMKING_TAKEOVER_LLMS_TXT', true),
+    ],
 ];

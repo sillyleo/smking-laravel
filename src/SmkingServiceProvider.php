@@ -96,34 +96,43 @@ class SmkingServiceProvider extends ServiceProvider
     }
 
     /**
-     * Auto-mount the inbound webhook receiver at /api/smking/webhook.
-     * Customer pastes that URL into the SmKing dashboard's webhook field;
-     * SaaS POSTs publish events here, we HMAC-verify, evict CmsClient
-     * cache. Single endpoint serves all future event types — branched
-     * inside the controller — so the wire interface stays small.
+     * Auto-mount SDK-provided routes for the unconfigured case:
+     *   - `/api/smking/webhook` — inbound HMAC-verified publish notifications
+     *     from SmKing SaaS (gated by `smking.webhook.enabled`, default true)
+     *   - `/sitemap.xml`        — SaaS-served sitemap.xml takeover (gated by
+     *     `smking.takeover.sitemap`, default true)
+     *   - `/llms.txt`           — SaaS-served llms.txt takeover (gated by
+     *     `smking.takeover.llms_txt`, default true)
      *
-     * Disable per config (`smking.webhook.enabled = false`) for customers
-     * who'd rather mount it manually on a custom path / domain.
+     * Production `route:cache` mode: service-provider auto-mount is skipped
+     * because Laravel doesn't re-run `boot()` after a route cache file
+     * exists. The wizard registers `require base_path('vendor/smking/laravel/routes/{webhook,takeover}.php')`
+     * in customer's route files so `route:cache` picks the routes up like
+     * any user-defined route (audit handoff #7 fix). Double-registration is
+     * idempotent — Laravel's route collection dedupes by name + method + URI.
+     *
+     * Per-route opt-out lives in `config/smking.php`. Customers who already
+     * own `/sitemap.xml` or `/llms.txt` should flip the matching flag to
+     * `false` rather than relying on route precedence.
      */
     private function registerRoutes(): void
     {
-        $enabled = (bool) ($this->app['config']->get('smking.webhook.enabled', true));
-        if (! $enabled) {
-            return;
-        }
-
         if (! method_exists($this->app, 'routesAreCached') || $this->app->routesAreCached()) {
             // Production route cache present — auto-mount is skipped here.
-            // smking-wizard registers `require base_path('vendor/smking/laravel/routes/webhook.php')`
-            // in customer's routes/api.php so route:cache picks it up like
-            // any user-defined route (audit handoff #7 fix).
+            // The wizard's `require` calls in customer route files cover this
+            // path so cached routes include the SDK ones.
             return;
         }
 
-        // Auto-mount for unconfigured installs (no wizard run, no route:cache).
-        // Once wizard runs, customer's routes/api.php require produces the
-        // same Route::post — Laravel dedupes by name + method + URI.
-        require __DIR__.'/../routes/webhook.php';
+        $webhookEnabled = (bool) $this->app['config']->get('smking.webhook.enabled', true);
+        if ($webhookEnabled) {
+            require __DIR__.'/../routes/webhook.php';
+        }
+
+        // takeover.php is self-gating per-path: it reads
+        // smking.takeover.sitemap / smking.takeover.llms_txt internally and
+        // skips the Route::get when false. No outer guard needed.
+        require __DIR__.'/../routes/takeover.php';
     }
 
     private function registerMiddleware(): void
