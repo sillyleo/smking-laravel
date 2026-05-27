@@ -57,6 +57,21 @@ class RobotsTxtBuilder
     {
         $lines = [self::BLOCK_START];
 
+        // Body-signature marker — picked up by the smking SaaS Worker
+        // proxy verifier. The string `smking-managed:` is what the
+        // verifier greps for to classify the file as SDK-served rather
+        // than customer-served. Static publish-robots output has no
+        // X-Smking-Status response header (nginx serves it before
+        // Laravel runs), so this body marker is the ONLY detection
+        // path for robots.txt — see worker-verify.ts hasTakeoverMarker.
+        //
+        // Marker carries no site UUID because the SDK doesn't know its
+        // own site identity (authenticated by API key only). The
+        // verifier's siteId-bound check (extractTakeoverMarkerSiteId)
+        // intentionally fails on this marker, but the looser
+        // hasTakeoverMarker() catches it.
+        $lines[] = '# smking-managed: laravel-sdk publish-robots';
+
         foreach ($bots as $name => $rule) {
             $directive = strtolower($rule) === 'disallow' ? 'Disallow: /' : 'Allow: /';
             $lines[] = '';
