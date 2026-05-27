@@ -48,7 +48,7 @@ class DoctorCommandTest extends TestCase
             'api.test/api/v1/public/aeo' => Http::response(['error' => 'missing key'], 400),
         ]);
 
-        $exit = $this->artisan('smking:doctor', ['--path' => '/'])->run();
+        $exit = $this->artisan('smking:doctor')->run();
 
         $this->assertSame(0, $exit);
     }
@@ -219,7 +219,7 @@ class DoctorCommandTest extends TestCase
         $output = new \Symfony\Component\Console\Output\BufferedOutput();
         $exit = \Illuminate\Support\Facades\Artisan::call(
             'smking:doctor',
-            ['--path' => '/', '--json' => true],
+            ['--json' => true],
             $output,
         );
         $stdout = trim($output->fetch());
