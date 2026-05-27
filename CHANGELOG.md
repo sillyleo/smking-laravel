@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.18.4 — Stamp `smking-managed` body marker on publish-robots output (2026-05-27)
+
+Static `public/robots.txt` written by `php artisan smking:publish-robots` had no detectable smking signature on the wire. Unlike `/sitemap.xml` and `/llms.txt` which are served dynamically by SDK controllers (and carry both an `X-Smking-Status: served` response header plus a saas-generated body marker), `robots.txt` is served as a static file by nginx/Apache **before Laravel ever runs** — so no response header is possible, and the existing managed block fences (`# {smking-aeo-block-start v1}` / `-end`) aren't unique enough for cross-origin verifiers to confidently classify the file as SDK-managed.
+
+`RobotsTxtBuilder::buildBlock` now emits a stable `# smking-managed: laravel-sdk publish-robots` line as the first content line inside the managed block. The smking SaaS-side Cloudflare Worker proxy verifier (smking-sdk-health-proxy) greps for `smking-managed:` substring across the body head and classifies any match as `sdk_serving`, so this single line is enough.
+
+### Notes
+
+- The marker carries no site UUID — the SDK doesn't know its own site identity (authenticated by API key only, never sees its site UUID). The verifier accepts un-bound markers as a looser fallback specifically for this case. False-positive risk on customer-rolled robots.txt is empirically near-zero.
+- Existing installs need a re-run of `php artisan smking:publish-robots --force` to pick up the new marker line. Idempotent — re-running with an already-managed robots.txt only replaces the smking block, customer rules above the block stay untouched.
+- 13 robots tests pass after the change.
+
+---
+
 ## v0.18.3 — Drop `__smking-doctor` synthetic path probe from doctor command (2026-05-27)
 
 `php artisan smking:doctor` was probing a synthetic path (`__smking-doctor` by default, via `--path=` option) and reporting an `info`-level "Path __smking-doctor status" row on every run. The probe never delivered useful signal:
