@@ -9,7 +9,6 @@ use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Foundation\Http\Kernel as FoundationKernel;
 use Illuminate\Http\Client\Factory as HttpFactory;
-use Smking\Laravel\AeoClient;
 use ReflectionClass;
 use ReflectionException;
 use Smking\Laravel\Http\Middleware\InjectAeo;
@@ -26,11 +25,11 @@ use Throwable;
  */
 class DoctorCommand extends Command
 {
-    protected $signature = 'smking:doctor {--path=__smking-doctor : Path to probe AEO status for (uses a synthetic path by default to avoid registering real URLs in the audit queue)} {--json : Output structured JSON instead of the pretty-printed report (used by the @smking/wizard install agent)}';
+    protected $signature = 'smking:doctor {--json : Output structured JSON instead of the pretty-printed report (used by the @smking/wizard install agent)}';
 
     protected $description = 'Verify smking SDK install + connectivity';
 
-    public function handle(Application $app, HttpFactory $http, AeoClient $client): int
+    public function handle(Application $app, HttpFactory $http): int
     {
         $checks = [
             $this->checkConfigPublished($app),
@@ -39,7 +38,6 @@ class DoctorCommand extends Command
             $this->checkBaseUrl(),
             $this->checkMiddlewareInKernel($app),
             $this->checkApiReachable($http),
-            $this->checkPathStatus($client, (string) $this->option('path')),
         ];
 
         $hasFailure = false;
@@ -322,20 +320,6 @@ class DoctorCommand extends Command
         // server accepted an invalid request without validation, which we
         // surface so the customer can investigate.
         return ['status' => 'fail', 'label' => 'API reachable', 'detail' => "unexpected HTTP {$status} from {$endpoint} (expected 400/401/422)"];
-    }
-
-    /**
-     * @return array{status: 'pass'|'fail'|'info', label: string, detail: string}
-     */
-    private function checkPathStatus(AeoClient $client, string $path): array
-    {
-        try {
-            $aeo = $client->forPath($path === '' ? '/' : $path);
-        } catch (Throwable $e) {
-            return ['status' => 'info', 'label' => "Path {$path} status", 'detail' => 'probe failed: '.$e->getMessage()];
-        }
-
-        return ['status' => 'info', 'label' => "Path {$path} status", 'detail' => $aeo->status];
     }
 
     /**

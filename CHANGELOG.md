@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.18.3 — Drop `__smking-doctor` synthetic path probe from doctor command (2026-05-27)
+
+`php artisan smking:doctor` was probing a synthetic path (`__smking-doctor` by default, via `--path=` option) and reporting an `info`-level "Path __smking-doctor status" row on every run. The probe never delivered useful signal:
+
+- On Cloudflare-WAF-protected sites the SaaS routinely returns `server_error` for synthetic paths (the path never registered an AEO record, so the upstream just throws), making the row a permanent false-positive distraction.
+- The new heartbeat mechanism (v0.18.0) — where every real AEO request piggybacks `sdk_meta` to the SaaS — is the canonical "SDK is active" signal. A probe targeting a guaranteed-missing path adds no information on top of heartbeat.
+- Even when the probe succeeded, the result was always `info` — never a pass/fail signal — so removing it can't make a previously-passing install fail.
+
+### Removed
+
+- `checkPathStatus()` private method on `DoctorCommand`.
+- `--path` CLI option on `smking:doctor` (the synthetic-path probe was its only consumer).
+- The `AeoClient` constructor dependency and `Smking\Laravel\AeoClient` import on `DoctorCommand` (now unused).
+
+The remaining six checks (config published / schema drift / api key / base url / middleware in kernel / api reachable) cover the actual install-correctness surface.
+
+### Tests
+
+`DoctorCommandTest` updated: two tests that passed `['--path' => '/']` to the artisan call were stripped (the option no longer exists). All 12 doctor tests + 181 SDK tests green.
+
+### Wizard compatibility
+
+`@soloworks/smking-wizard` 0.6.0 and earlier expected the path-status row to exist but only ever inspected `summary.ok` — removing the row cannot break the wizard. Wizard 0.6.1 final-output discipline (commandment §14) explicitly forbids surfacing probe tables anyway.
+
+---
+
 ## v0.18.2 — Namespace defence on takeover routes (2026-05-26)
 
 **Critical fix for customers running legacy RouteServiceProvider (`protected $namespace = 'App\Http\Controllers'`) — without this, `routes/web.php` 500s entirely once the wizard requires `routes/takeover.php` from it.**
