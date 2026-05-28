@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.18.5 — CMS live-URL reporting via CmsClient query params (2026-05-28)
+
+`CmsClient::fetch()` now appends `sdk=laravel`, `sdk_version`, `app_env`, `url` (the current `request()->fullUrl()`), and `path` to its `GET /api/v1/public/page` request — parity with the Next SDK's CMS reporting (`@soloworks/smking-next` 0.18.0). The smking SaaS stores the real per-slug `page_url`, so the dashboard "View page ↗" link deep-links to the actual customer URL instead of a guessed domain, and records a CMS-side SDK heartbeat into `sdk_health_snapshots`.
+
+### Notes
+
+- **Fail-open**: if the request scope isn't bound (console / queue render), the `url` / `path` params are simply omitted — the fetch still works with just `key` + `slug`.
+- `sdk_version` is read from `Composer\InstalledVersions::getVersion('smking/laravel')`, so it always matches the installed package — no hardcoded constant to drift.
+- No customer action required — the extra query params are additive and the SaaS treats them as optional. The `GET` (and its `cms_ttl` cache) is unchanged.
+
 ## v0.18.4 — Stamp `smking-managed` body marker on publish-robots output (2026-05-27)
 
 Static `public/robots.txt` written by `php artisan smking:publish-robots` had no detectable smking signature on the wire. Unlike `/sitemap.xml` and `/llms.txt` which are served dynamically by SDK controllers (and carry both an `X-Smking-Status: served` response header plus a saas-generated body marker), `robots.txt` is served as a static file by nginx/Apache **before Laravel ever runs** — so no response header is possible, and the existing managed block fences (`# {smking-aeo-block-start v1}` / `-end`) aren't unique enough for cross-origin verifiers to confidently classify the file as SDK-managed.

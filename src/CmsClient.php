@@ -57,15 +57,39 @@ class CmsClient
             return CmsPage::notFound();
         }
 
+        $queryParams = [
+            'key' => $apiKey,
+            'slug' => $slug,
+            'sdk' => 'laravel',
+        ];
+
+        if (class_exists(\Composer\InstalledVersions::class) && \Composer\InstalledVersions::isInstalled('smking/laravel')) {
+            $queryParams['sdk_version'] = \Composer\InstalledVersions::getVersion('smking/laravel');
+        }
+
+        $appEnv = $this->config->get('app.env');
+        if (is_string($appEnv)) {
+            $queryParams['app_env'] = $appEnv;
+        }
+
+        try {
+            if (function_exists('request')) {
+                $req = request();
+                if ($req !== null) {
+                    $queryParams['url'] = $req->fullUrl();
+                    $queryParams['path'] = '/' . ltrim($req->path(), '/');
+                }
+            }
+        } catch (Throwable) {
+            // Safe fallback if request scope is not bound
+        }
+
         try {
             $response = $this->http
                 ->connectTimeout($this->httpTimeoutInt($this->connectTimeout()))
                 ->timeout($this->httpTimeoutInt($this->readTimeout()))
                 ->acceptJson()
-                ->get($this->endpoint('/api/v1/public/page'), [
-                    'key' => $apiKey,
-                    'slug' => $slug,
-                ]);
+                ->get($this->endpoint('/api/v1/public/page'), $queryParams);
         } catch (Throwable $e) {
             $this->logger?->warning('smking: CMS fetch failed', [
                 'message' => $e->getMessage(),
