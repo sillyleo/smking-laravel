@@ -889,6 +889,12 @@ class AeoClient
                 : null,
             'app_env' => is_string($env = $this->config->get('app.env')) ? $env : null,
             'host' => $this->safeHost(),
+            // Site-level CMS base path — lets the smking dashboard build
+            // "View page" URLs (domain + base path + slug) without per-page
+            // visits. Default "/blog" via config; null only if explicitly unset.
+            'cms_base_path' => is_string($cb = $this->config->get('smking.cms.base_path'))
+                ? $cb
+                : null,
         ];
     }
 

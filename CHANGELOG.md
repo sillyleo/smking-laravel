@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.19.0 — CMS base path reported via AEO heartbeat (2026-05-29)
+
+`AeoClient`'s heartbeat (`sdk_meta`, piggybacked on every AEO request) now
+carries `cms_base_path` — the site-level CMS mount path from the new
+`smking.cms.base_path` config (`SMKING_CMS_PATH` env, default `/blog`). The
+smking dashboard stores it on the site and builds "View page" links as
+`domain + base path + slug`, so a CMS page resolves to its real URL the
+moment ANY page on the site is crawled — no per-page visit required. This
+supersedes 0.18.5's per-slug `page_url` discovery (which needed each page to
+be hit first). Set `SMKING_CMS_PATH` only if your CMS catch-all is mounted
+somewhere other than `/blog`.
+
 ## v0.18.5 — CMS live-URL reporting via CmsClient query params (2026-05-28)
 
 `CmsClient::fetch()` now appends `sdk=laravel`, `sdk_version`, `app_env`, `url` (the current `request()->fullUrl()`), and `path` to its `GET /api/v1/public/page` request — parity with the Next SDK's CMS reporting (`@soloworks/smking-next` 0.18.0). The smking SaaS stores the real per-slug `page_url`, so the dashboard "View page ↗" link deep-links to the actual customer URL instead of a guessed domain, and records a CMS-side SDK heartbeat into `sdk_health_snapshots`.
