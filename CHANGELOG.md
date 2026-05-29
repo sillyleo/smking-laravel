@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.19.1 — AEO cold-start retry for low-traffic / cold-path sites (2026-05-29)
+
+`AeoClient` discovery now retries **once** on a first-attempt timeout /
+connection failure — using a generous cold-start timeout (default 8s) — instead
+of collapsing straight to `server_error`.
+
+The steady-state read timeout (1.5s) assumed AEO is always a hot path that keeps
+the upstream serverless function warm. On low-traffic, newly-launched, or
+off-peak sites the function goes cold, so the first hit eats a 3-5s cold start
+and blows the 1.5s budget. The resulting `server_error` then stuck in the
+adaptive-backoff cache (up to 24h), so AEO injection silently stayed dead — and
+because the SaaS only registers a path for background crawling once a POST
+actually lands, the page's AEO content never got generated either. Both symptoms
+share this one root cause.
+
+The first attempt's timeout itself wakes the serverless function, so the single
+retry lands on a now-warm instance. Warm sites never retry (the first attempt
+succeeds), so steady-state latency and the FPM-pool protection from v0.7.0 are
+untouched. A genuinely dead upstream still fails both attempts and collapses to
+`server_error`, where the existing adaptive backoff + per-surface circuit
+breaker take over unchanged. The retry is gated on a thrown request (transport
+failure) — a transport success carrying a 5xx is the SaaS reporting its own
+breakage and is **not** retried.
+
+Surfaced on www-dev.sleepytofu.com (stage): `curl /blog` returned
+`x-smking-status: server_error` while CMS (`<x-smking-cms>`, GET + cold-path
+timeout) rendered fine — the GET/POST + timeout asymmetry pinned it to AEO.
+
+### Config (all optional, backward-compatible defaults)
+
+- `SMKING_COLD_START_RETRY` (default `true`) — set `false` to revert to
+  single-shot discovery (a first-attempt timeout immediately yields
+  `server_error`, pre-0.19.1 behavior).
+- `SMKING_COLD_START_TIMEOUT` (default `8.0`) — read timeout for the retry.
+- `SMKING_COLD_START_CONNECT_TIMEOUT` (default `3.0`) — connect timeout for the retry.
+
+### Notes
+
+- **No customer action required** — defaults are on and backward-compatible;
+  warm sites see no behavior change, low-traffic / stage sites recover
+  automatically.
+- Applies to the AEO HTML surface (`forPath` / `forProductId`). The
+  markdown-for-agents surface (`getMarkdown`) keeps single-shot semantics this
+  release; cold-start retry there is a possible follow-up.
+- `^0.19` constraint holders pick this up on `composer update`. Sites still on
+  `^0.18` must bump their constraint to `^0.19` to receive it (along with
+  0.19.0's CMS base-path heartbeat).
+- 186 SDK tests green (5 new cold-start retry cases).
+
 ## v0.19.0 — CMS base path reported via AEO heartbeat (2026-05-29)
 
 `AeoClient`'s heartbeat (`sdk_meta`, piggybacked on every AEO request) now

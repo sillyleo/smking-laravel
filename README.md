@@ -231,6 +231,16 @@ SMKING_CONNECT_TIMEOUT=0.5
 SMKING_HTTP_TIMEOUT=1
 ```
 
+**Conversely, low-traffic / stage / newly-launched sites have the opposite problem** (v0.19.1+): they don't keep the upstream serverless function warm, so the first AEO hit eats a 3-5s cold start that blows the 1.5s read timeout → `server_error` stuck in the backoff cache (and the page never gets registered for crawling). AEO discovery now retries **once** on a first-attempt timeout using a generous cold-start timeout — the first attempt wakes the function, the retry lands warm. Warm sites never retry, so there's zero steady-state impact.
+
+```dotenv
+SMKING_COLD_START_RETRY=true          # default; set false for single-shot discovery
+SMKING_COLD_START_TIMEOUT=8           # read timeout (s) for the retry attempt
+SMKING_COLD_START_CONNECT_TIMEOUT=3   # connect timeout (s) for the retry attempt
+```
+
+The retry only fires on a thrown request (DNS / TCP / timeout) — a transport success carrying a 5xx isn't retried (the SaaS is reporting its own breakage). Applies to the AEO HTML surface; the markdown-for-agents surface keeps single-shot semantics.
+
 ### 3. Kill switch when SaaS is in trouble
 
 Set in `.env` and clear config cache:
