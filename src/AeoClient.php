@@ -285,21 +285,36 @@ class AeoClient
             static fn ($value) => $value !== null && $value !== '',
         );
 
-        try {
-            $response = $this->http
-                ->connectTimeout($this->httpTimeoutInt($this->connectTimeout()))
-                ->timeout($this->httpTimeoutInt($this->readTimeout()))
-                ->acceptJson()
-                ->asJson()
-                ->post($this->endpoint('/api/v1/public/aeo'), $payload);
-        } catch (Throwable $e) {
-            // DNS / TCP / read timeout / connection errors → SaaS effectively
-            // unreachable. v0.7.0: treat as server_error so cache TTL is 24hr
-            // (vs not_found 15min), saving a million-PV site from retrying
-            // a dead upstream every 30 seconds.
+        // First attempt at the steady-state read timeout (default 1.5s). On a
+        // warm Vercel function this returns immediately; the tight timeout
+        // protects the FPM pool on high-traffic sites.
+        $response = $this->postDiscover($payload, $this->connectTimeout(), $this->readTimeout());
+
+        // Cold-start retry (v0.19.0): low-traffic / newly-launched / off-peak
+        // sites don't keep the upstream serverless function warm, so AEO is
+        // effectively a cold path (3-5s first-hit) despite the hot-path
+        // default the 1.5s read timeout assumes. The first attempt's timeout
+        // itself wakes the function; a single retry at a generous timeout then
+        // lands on the now-warm instance. Warm sites never reach here (first
+        // attempt succeeds) so steady-state latency is unaffected. A genuinely
+        // dead upstream fails both attempts → serverError() → the existing
+        // adaptive backoff + circuit breaker take over.
+        if ($response === null && $this->coldStartRetryEnabled()) {
+            $response = $this->postDiscover(
+                $payload,
+                $this->coldStartConnectTimeout(),
+                $this->coldStartTimeout(),
+            );
+        }
+
+        if ($response === null) {
+            // DNS / TCP / read timeout / connection error on every attempt →
+            // SaaS effectively unreachable. v0.7.0: treat as server_error so
+            // cache TTL escalates (vs not_found 15min), saving a million-PV
+            // site from hammering a dead upstream.
             $this->logger?->warning('smking: AEO discovery failed', [
-                'message' => $e->getMessage(),
                 'body' => $body,
+                'cold_start_retry' => $this->coldStartRetryEnabled(),
             ]);
 
             return AeoResponse::serverError();
@@ -331,6 +346,38 @@ class AeoClient
         }
 
         return AeoResponse::fromArray($json);
+    }
+
+    /**
+     * Single upstream POST attempt. Returns the response, or null when the
+     * request threw (DNS / TCP / read timeout / connection error). The null
+     * sentinel lets {@see discover()} decide whether to cold-start retry
+     * before collapsing to serverError() — distinct from a transport success
+     * that happens to carry a 4xx/5xx status, which the caller inspects.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function postDiscover(array $payload, float $connectTimeout, float $readTimeout): ?\Illuminate\Http\Client\Response
+    {
+        try {
+            return $this->http
+                ->connectTimeout($this->httpTimeoutInt($connectTimeout))
+                ->timeout($this->httpTimeoutInt($readTimeout))
+                ->acceptJson()
+                ->asJson()
+                ->post($this->endpoint('/api/v1/public/aeo'), $payload);
+        } catch (Throwable $e) {
+            // Debug (not warning): a first-attempt timeout that the cold-start
+            // retry then recovers from is normal on cold-path sites — logging
+            // it as a warning would cry wolf. discover() emits the single
+            // warning only when *all* attempts fail.
+            $this->logger?->debug('smking: AEO discovery attempt failed', [
+                'message' => $e->getMessage(),
+                'read_timeout' => $readTimeout,
+            ]);
+
+            return null;
+        }
     }
 
     /**
@@ -375,6 +422,42 @@ class AeoClient
         $value = $this->config->get('smking.timeout', 1.5);
 
         return is_numeric($value) ? (float) $value : 1.5;
+    }
+
+    /**
+     * Cold-start retry toggle (v0.19.0). Default true. Set
+     * SMKING_COLD_START_RETRY=false to disable the second attempt — a first-
+     * attempt timeout then collapses straight to server_error (pre-v0.19
+     * behavior).
+     */
+    private function coldStartRetryEnabled(): bool
+    {
+        return (bool) $this->config->get('smking.cold_start_retry', true);
+    }
+
+    /**
+     * Read timeout (seconds) for the cold-start retry attempt; default 8.0s —
+     * generous enough to absorb a Vercel cold start (3-5s) that the first
+     * attempt's tight read timeout couldn't. Floats accepted; see
+     * connectTimeout() for the httpTimeoutInt() requirement on Laravel 11+.
+     */
+    private function coldStartTimeout(): float
+    {
+        $value = $this->config->get('smking.cold_start_timeout', 8.0);
+
+        return is_numeric($value) ? (float) $value : 8.0;
+    }
+
+    /**
+     * Connect timeout (seconds) for the cold-start retry attempt; default
+     * 3.0s — looser than the steady-state connect_timeout to tolerate a
+     * sluggish first TCP handshake to a cold edge.
+     */
+    private function coldStartConnectTimeout(): float
+    {
+        $value = $this->config->get('smking.cold_start_connect_timeout', 3.0);
+
+        return is_numeric($value) ? (float) $value : 3.0;
     }
 
     /**

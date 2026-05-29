@@ -937,4 +937,117 @@ class AeoClientTest extends TestCase
 
         $this->assertSame('not_found', $response->status);
     }
+
+    // ── Cold-start retry (v0.19.0) ────────────────────────────────
+    //
+    // Low-traffic / newly-launched / off-peak sites don't keep the upstream
+    // serverless function warm, so AEO's "hot-path → 1.5s is enough"
+    // assumption breaks: the first hit eats a 3-5s cold start → timeout →
+    // server_error stuck in backoff cache. A single retry at a generous
+    // timeout lands on the now-warm function the first attempt woke.
+
+    public function test_cold_start_retry_recovers_from_first_attempt_timeout(): void
+    {
+        config()->set('smking.cold_start_retry', true);
+
+        $attempts = 0;
+        Http::fake([
+            'api.test/api/v1/public/aeo' => function () use (&$attempts) {
+                $attempts++;
+                if ($attempts === 1) {
+                    throw new \Illuminate\Http\Client\ConnectionException('cold start read timeout');
+                }
+
+                return Http::response([
+                    'status' => 'ready',
+                    'jsonLd' => ['@type' => 'Product', 'name' => 'Widget'],
+                ], 200);
+            },
+        ]);
+
+        $response = $this->app->make(AeoClient::class)
+            ->forPath('/products/widget', 'https://shop.example/products/widget');
+
+        $this->assertTrue($response->isReady(), 'cold-start retry must recover a first-attempt timeout');
+        $this->assertSame('Widget', $response->jsonLd['name']);
+        $this->assertSame(2, $attempts, 'first attempt times out, retry succeeds → exactly 2 upstream calls');
+    }
+
+    public function test_cold_start_retry_disabled_collapses_to_server_error_on_first_timeout(): void
+    {
+        config()->set('smking.cold_start_retry', false);
+
+        $attempts = 0;
+        Http::fake([
+            'api.test/api/v1/public/aeo' => function () use (&$attempts) {
+                $attempts++;
+                throw new \Illuminate\Http\Client\ConnectionException('timeout');
+            },
+        ]);
+
+        $response = $this->app->make(AeoClient::class)->forPath('/x');
+
+        $this->assertSame(AeoResponse::STATUS_SERVER_ERROR, $response->status);
+        $this->assertSame(1, $attempts, 'retry disabled → single attempt, no second call');
+    }
+
+    public function test_warm_response_does_not_trigger_cold_start_retry(): void
+    {
+        config()->set('smking.cold_start_retry', true);
+
+        $attempts = 0;
+        Http::fake([
+            'api.test/api/v1/public/aeo' => function () use (&$attempts) {
+                $attempts++;
+
+                return Http::response(['status' => 'ready', 'jsonLd' => ['@type' => 'Product']], 200);
+            },
+        ]);
+
+        $response = $this->app->make(AeoClient::class)->forPath('/warm');
+
+        $this->assertTrue($response->isReady());
+        $this->assertSame(1, $attempts, 'warm first attempt succeeds → retry never fires (zero steady-state impact)');
+    }
+
+    public function test_cold_start_retry_both_attempts_fail_yields_server_error(): void
+    {
+        config()->set('smking.cold_start_retry', true);
+
+        $attempts = 0;
+        Http::fake([
+            'api.test/api/v1/public/aeo' => function () use (&$attempts) {
+                $attempts++;
+                throw new \Illuminate\Http\Client\ConnectionException('upstream genuinely dead');
+            },
+        ]);
+
+        $response = $this->app->make(AeoClient::class)->forPath('/dead');
+
+        $this->assertSame(AeoResponse::STATUS_SERVER_ERROR, $response->status);
+        $this->assertSame(2, $attempts, 'genuinely dead upstream fails first + retry → 2 attempts then server_error');
+    }
+
+    public function test_cold_start_retry_only_fires_on_transport_failure_not_5xx(): void
+    {
+        // A transport SUCCESS carrying a 5xx is the SaaS reporting its own
+        // breakage — retrying won't help and would just double the latency.
+        // Retry is gated on the null sentinel (thrown request), so a 503
+        // must NOT trigger a second attempt.
+        config()->set('smking.cold_start_retry', true);
+
+        $attempts = 0;
+        Http::fake([
+            'api.test/api/v1/public/aeo' => function () use (&$attempts) {
+                $attempts++;
+
+                return Http::response('upstream broken', 503);
+            },
+        ]);
+
+        $response = $this->app->make(AeoClient::class)->forPath('/x');
+
+        $this->assertSame(AeoResponse::STATUS_SERVER_ERROR, $response->status);
+        $this->assertSame(1, $attempts, '5xx is a transport success → no cold-start retry');
+    }
 }

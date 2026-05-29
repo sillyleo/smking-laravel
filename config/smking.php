@@ -360,6 +360,30 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | AEO cold-start retry (v0.19.0)
+    |--------------------------------------------------------------------------
+    |
+    | The 1.5s read timeout above assumes AEO is a hot path that keeps the
+    | upstream serverless function warm. That assumption breaks on low-traffic,
+    | newly-launched, or off-peak sites: the function goes cold and the first
+    | hit eats a 3-5s cold start, blowing the 1.5s budget → server_error,
+    | which then sticks in the adaptive-backoff cache.
+    |
+    | When enabled, a first-attempt timeout / connection failure triggers ONE
+    | retry at a generous timeout. The first attempt already woke the function,
+    | so the retry lands on a warm instance. Warm sites never retry (the first
+    | attempt succeeds) so steady-state latency is untouched; a genuinely dead
+    | upstream still fails both attempts and collapses to server_error.
+    |
+    | Set SMKING_COLD_START_RETRY=false to revert to single-shot discovery.
+    |
+    */
+    'cold_start_retry' => env('SMKING_COLD_START_RETRY', true),
+    'cold_start_timeout' => env('SMKING_COLD_START_TIMEOUT', 8.0),
+    'cold_start_connect_timeout' => env('SMKING_COLD_START_CONNECT_TIMEOUT', 3.0),
+
+    /*
+    |--------------------------------------------------------------------------
     | CMS HTTP timeouts (separate from AEO since v0.11.0)
     |--------------------------------------------------------------------------
     |
