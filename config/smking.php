@@ -321,6 +321,14 @@ return [
     */
     'cms' => [
         'inline_styles' => env('SMKING_CMS_INLINE_STYLES', true),
+
+        // CMS mount path on YOUR site — where the catch-all renders CMS
+        // pages (e.g. "/blog"). Reported to smking on every heartbeat so
+        // the dashboard's "View page" links resolve to the right URL
+        // without waiting for each page to be visited. Default "/blog";
+        // the wizard sets SMKING_CMS_PATH when you mount under a
+        // different prefix.
+        'base_path' => env('SMKING_CMS_PATH', '/blog'),
     ],
 
     /*
