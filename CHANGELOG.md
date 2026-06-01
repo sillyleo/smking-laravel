@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.19.2 — Recursive config merge: stale published configs keep package defaults (2026-06-01)
+
+`SmkingServiceProvider` now **deep-merges** package config over the customer's
+published `config/smking.php`, replacing Laravel's shallow `mergeConfigFrom`.
+
+Laravel's built-in `mergeConfigFrom` only `array_merge`s the TOP level of a
+config tree. A customer whose published `config/smking.php` predates a
+newly-added nested default — most recently `cms.base_path` (the CMS mount
+prefix, added long after the config was first published) — had their partial
+`cms` array replace ours wholesale, so `config('smking.cms.base_path')` resolved
+to `null`. The heartbeat then reported `cms_base_path: null`, the dashboard
+stored an empty mount prefix, and published CMS nav cards (`nav-recent-posts` /
+`nav-taxonomy-list`) linked to `/${slug}` instead of `/blog/${slug}` — 404ing on
+every card. Setting `SMKING_CMS_PATH` in `.env` couldn't fix it either: the
+stale config array had no `base_path` line calling `env()`.
+
+`Support\ConfigMerge::deep` walks nested associative arrays so package defaults
+survive unless the customer explicitly set that exact leaf. List arrays (crawler
+patterns, except-patterns) are still replaced verbatim, never concatenated, so
+ordered lists don't duplicate. This fixes not only `cms.base_path` but every
+nested default a stale published config would otherwise silently drop.
+
+**Upgrade**: `composer update smking/laravel` — no customer code change. After
+upgrading, the next heartbeat reports the correct `cms_base_path` automatically;
+**re-publish any already-published CMS pages once** so their nav-card links bake
+in the mount prefix (snapshots are materialized at publish time).
+
 ## v0.19.1 — AEO cold-start retry for low-traffic / cold-path sites (2026-05-29)
 
 `AeoClient` discovery now retries **once** on a first-attempt timeout /

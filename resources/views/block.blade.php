@@ -66,7 +66,7 @@
                             $entryImage = is_string($_entry['featuredImageUrl'] ?? null) ? $_entry['featuredImageUrl'] : null;
                             $entryDate = is_string($_entry['publishedAt'] ?? null) ? $_entry['publishedAt'] : null;
                         @endphp
-                        <li class="smk-nav__item">
+                        <li class="smk-nav__item{{ $loop->first && $layout === 'featured' ? ' smk-nav__item--featured' : '' }}">
                             <a href="/{{ ltrim($entrySlug, '/') }}" class="smk-nav__link">
                                 @if($entryImage)
                                     <img src="{{ $entryImage }}" alt="" class="smk-nav__thumb" loading="lazy">
@@ -138,6 +138,35 @@
                 @endforeach
             </div>
         </section>
+        @break
+
+    @case('category-nav')
+        @php
+            $items = is_array($props['items'] ?? null) ? $props['items'] : [];
+            $align = ($props['align'] ?? null) === 'center' ? 'center' : 'left';
+            $items = array_values(array_filter($items, function ($it) {
+                return is_array($it)
+                    && is_string($it['label'] ?? null) && trim($it['label']) !== ''
+                    && is_string($it['href'] ?? null) && trim($it['href']) !== '';
+            }));
+        @endphp
+        <nav class="smk-block smk-block--category-nav smk-cat-nav"
+             data-block-id="{{ $id }}"
+             data-block-component="category-nav"
+             data-align="{{ $align }}"
+             aria-label="Categories">
+            @if(count($items) === 0)
+                <p class="smk-cat-nav__empty">No categories yet.</p>
+            @else
+                <ul class="smk-cat-nav__list">
+                    @foreach($items as $_item)
+                        <li class="smk-cat-nav__item">
+                            <a class="smk-cat-nav__link" href="{{ $_item['href'] }}">{{ $_item['label'] }}</a>
+                        </li>
+                    @endforeach
+                </ul>
+            @endif
+        </nav>
         @break
 
     @default
