@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Smking\Laravel;
 
+use Illuminate\Contracts\Foundation\CachesConfiguration;
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
 use Illuminate\Foundation\Http\Kernel as FoundationKernel;
 use Illuminate\Support\ServiceProvider;
@@ -17,6 +18,7 @@ use Smking\Laravel\Console\PublishRobotsTxtCommand;
 use Smking\Laravel\Http\Controllers\WebhookController;
 use Smking\Laravel\Http\Middleware\InjectAeo;
 use Smking\Laravel\Http\Middleware\TrackCrawlerHit;
+use Smking\Laravel\Support\ConfigMerge;
 use Smking\Laravel\Tiptap\EditorFactory;
 use Smking\Laravel\View\Components\Aeo as AeoComponent;
 use Smking\Laravel\View\Components\Cms as CmsComponent;
@@ -27,7 +29,11 @@ class SmkingServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
-        $this->mergeConfigFrom(__DIR__.'/../config/smking.php', 'smking');
+        // Recursive merge (NOT the parent's shallow mergeConfigFrom) — a
+        // customer's older published config/smking.php that predates a
+        // nested default like `cms.base_path` would otherwise drop it,
+        // surfacing as a null cms_base_path on heartbeat. See ConfigMerge.
+        $this->mergeConfigRecursivelyFrom(__DIR__.'/../config/smking.php', 'smking');
 
         $this->app->singleton(AeoClient::class, function ($app): AeoClient {
             return new AeoClient(
@@ -60,6 +66,31 @@ class SmkingServiceProvider extends ServiceProvider
         });
 
         $this->app->alias(CmsClient::class, 'smking.cms');
+    }
+
+    /**
+     * Recursive variant of {@see ServiceProvider::mergeConfigFrom}. The
+     * built-in only array_merges the TOP level of the config tree, so a
+     * customer's published config that omits a newly-added nested default
+     * (an older `cms` section without `base_path`, say) wipes that default
+     * wholesale. ConfigMerge::deep walks associative arrays so package
+     * defaults survive unless the customer set that exact leaf. Mirrors the
+     * parent's config-cache guard (cached config already holds the result).
+     */
+    protected function mergeConfigRecursivelyFrom(string $path, string $key): void
+    {
+        if (
+            $this->app instanceof CachesConfiguration
+            && $this->app->configurationIsCached()
+        ) {
+            return;
+        }
+
+        $config = $this->app->make('config');
+        $config->set(
+            $key,
+            ConfigMerge::deep(require $path, $config->get($key, [])),
+        );
     }
 
     public function boot(): void
