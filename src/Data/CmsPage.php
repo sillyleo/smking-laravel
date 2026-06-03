@@ -19,7 +19,7 @@ namespace Smking\Laravel\Data;
  *   dispatches each block to its rendered partial. Article blocks
  *   carry pre-rendered HTML in `props.html` (server-rendered by Plate
  *   `serializeHtml` on the SaaS side, so SDK ships zero editor deps).
- *   Other components (hero / nav-* / carousel) get markup composed
+ *   Other components (hero / nav-taxonomy-list) get markup composed
  *   on the SDK side from the block's props.
  *
  * - `bodyHtml` — server-rendered HTML produced by tiptap-php
