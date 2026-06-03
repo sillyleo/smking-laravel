@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.20.1 — Drop removed CMS block Blade cases (2026-06-03)
+
+Removed `@case('carousel')`, `@case('nav-recent-posts')`, `@case('nav-search')`,
+and `@case('category-nav')` from `block.blade.php`. These block components were
+deleted from the dashboard CMS editor in prior releases; the dead Blade render
+paths are now removed to match. Active cases (`article`, `hero`,
+`nav-taxonomy-list`, and the `@default` unknown-block guard) are unchanged.
+
+No customer action needed — unknown blocks already fell through to the `@default`
+empty marker.
+
 ## v0.20.0 — CMS SEO + JSON-LD move to the structured-data engine (2026-06-02)
 
 `<x-smking-cms>` **no longer emits** `<title>` / `<meta>` / `og:*` /
