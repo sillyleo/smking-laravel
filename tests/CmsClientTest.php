@@ -202,13 +202,14 @@ class CmsClientTest extends TestCase
         $this->assertStringContainsString('loading="lazy"', $page->bodyHtml);
     }
 
-    public function test_preview_cookie_sends_preview_token_and_renders_preview(): void
+    public function test_preview_query_param_sends_preview_token_and_renders_preview(): void
     {
+        // Token arrives as the ?smking_preview= query param (set by the
+        // /smking-preview redirect), not a cookie.
         $this->app->instance('request', \Illuminate\Http\Request::create(
             '/blog',
             'GET',
-            [],
-            ['smking_preview_token' => 'TOK'],
+            ['smking_preview' => 'TOK'],
         ));
 
         Http::fake([
@@ -233,7 +234,7 @@ class CmsClientTest extends TestCase
             && $request['preview_token'] === 'TOK');
     }
 
-    public function test_no_preview_cookie_omits_preview_token(): void
+    public function test_no_preview_query_param_omits_preview_token(): void
     {
         Http::fake([
             '*' => Http::response([
