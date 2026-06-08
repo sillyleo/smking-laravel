@@ -476,13 +476,16 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | CMS draft preview (v0.21.0+)
+    | CMS draft preview
     |--------------------------------------------------------------------------
     |
-    | The SDK auto-mounts a `/smking-preview` route (set short-lived cookie +
-    | redirect) so the dashboard 預覽鈕 can show draftBlocks on the real
-    | customer page. Fail-safe: no token → plain redirect, no cookie. Flip to
-    | false to disable the route (e.g. if you own that path).
+    | The SDK auto-mounts a `/smking-preview` route that redirects to the page
+    | with the short-lived token as a `?smking_preview=` query param, so the
+    | dashboard 預覽鈕 can show draftBlocks on the real customer page. Using a
+    | query param (not a cookie) keeps it clear of your EncryptCookies
+    | middleware and makes the preview URL visibly distinct from the live page.
+    | Fail-safe: no token → plain redirect. Flip to false to disable the route
+    | (e.g. if you own that path).
     |
     */
     'preview' => [

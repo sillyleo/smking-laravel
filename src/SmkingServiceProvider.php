@@ -6,7 +6,6 @@ namespace Smking\Laravel;
 
 use Illuminate\Contracts\Foundation\CachesConfiguration;
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
-use Illuminate\Cookie\Middleware\EncryptCookies;
 use Illuminate\Foundation\Http\Kernel as FoundationKernel;
 use Illuminate\Support\ServiceProvider;
 use ReflectionClass;
@@ -115,7 +114,6 @@ class SmkingServiceProvider extends ServiceProvider
 
         $this->registerMiddleware();
         $this->registerRoutes();
-        $this->exemptPreviewCookieFromEncryption();
 
         if ($this->app->runningInConsole()) {
             $this->commands([
@@ -170,29 +168,6 @@ class SmkingServiceProvider extends ServiceProvider
         // preview.php is self-gating (reads smking.preview.enabled). CMS
         // draft preview entry; harmless + fail-safe when no token is present.
         require __DIR__.'/../routes/preview.php';
-    }
-
-    /**
-     * Exempt the preview cookie from the customer's EncryptCookies middleware.
-     *
-     * The preview cookie is SET by a bare (non-web-group) route — the
-     * auto-mounted `/smking-preview` — but READ on the customer's CMS page,
-     * which DOES run the `web` group. Without this exemption, the customer's
-     * EncryptCookies treats the plaintext cookie as tampered and strips it on
-     * the inbound request, so `CmsClient::previewToken()` sees nothing and the
-     * "zero-code" preview silently renders the published page instead of the
-     * draft. `except()` mutates a global static, so it covers the customer's
-     * middleware instance too — zero customer code. (Token security is its own
-     * short-lived signature + httpOnly + Secure-on-HTTPS, not cookie encryption.)
-     */
-    private function exemptPreviewCookieFromEncryption(): void
-    {
-        if (! (bool) $this->app['config']->get('smking.preview.enabled', true)) {
-            return;
-        }
-        if (method_exists(EncryptCookies::class, 'except')) {
-            EncryptCookies::except(['smking_preview_token']);
-        }
     }
 
     private function registerMiddleware(): void

@@ -7,9 +7,11 @@ namespace Smking\Laravel\Tests;
 use Illuminate\Support\Facades\Route;
 
 /**
- * CMS draft preview entry (v0.21.0+). The SDK auto-mounts `/smking-preview`
- * which sets a short-lived `smking_preview_token` cookie + redirects to the
- * (relative) page, where `<x-smking-cms>` then renders draftBlocks.
+ * CMS draft preview entry. The SDK auto-mounts `/smking-preview`, which
+ * redirects to the (relative) page carrying the short-lived token as a
+ * `?smking_preview=` query param, where `<x-smking-cms>` then renders
+ * draftBlocks. No cookie — sidesteps the customer's EncryptCookies middleware
+ * and keeps the preview URL visibly distinct from the live page.
  */
 class PreviewControllerTest extends TestCase
 {
@@ -46,59 +48,40 @@ class PreviewControllerTest extends TestCase
         );
     }
 
-    public function test_sets_cookie_and_redirects_to_path(): void
+    public function test_appends_token_as_query_param_and_redirects(): void
     {
         $response = $this->get('/smking-preview?token=TOK&path=/blog/x');
 
-        $response->assertRedirect('/blog/x');
+        // Token rides on the redirect target as a query param — no cookie, and
+        // the URL is visibly a preview (vs the clean published page URL).
+        $response->assertRedirect('/blog/x?smking_preview=TOK');
+    }
 
-        $cookie = collect($response->headers->getCookies())
-            ->first(fn ($c) => $c->getName() === 'smking_preview_token');
-        $this->assertNotNull($cookie, 'preview cookie must be set on the redirect');
-        $this->assertSame('TOK', $cookie->getValue());
-        // 15-min TTL (cookie expiry is a unix timestamp in the future).
-        $this->assertGreaterThan(time(), $cookie->getExpiresTime());
+    public function test_appends_with_ampersand_when_path_already_has_query(): void
+    {
+        $response = $this->get('/smking-preview?token=TOK&path=/blog/x?foo=1');
+
+        $response->assertRedirect('/blog/x?foo=1&smking_preview=TOK');
     }
 
     public function test_open_redirect_guard_protocol_relative_path(): void
     {
+        // path coerced to "/" (never evil.com); token still appended.
         $response = $this->get('/smking-preview?token=TOK&path=//evil.com');
-        $response->assertRedirect('/');
+        $response->assertRedirect('/?smking_preview=TOK');
     }
 
     public function test_open_redirect_guard_absolute_url_path(): void
     {
         $response = $this->get('/smking-preview?token=TOK&path=https://evil.com');
-        $response->assertRedirect('/');
+        $response->assertRedirect('/?smking_preview=TOK');
     }
 
-    public function test_no_token_redirects_without_setting_cookie(): void
+    public function test_no_token_redirects_without_preview_param(): void
     {
         $response = $this->get('/smking-preview?path=/blog/x');
 
+        // Fail-safe: no token → plain redirect to the live page, no param.
         $response->assertRedirect('/blog/x');
-        $cookie = collect($response->headers->getCookies())
-            ->first(fn ($c) => $c->getName() === 'smking_preview_token');
-        $this->assertNull($cookie, 'no token → no cookie (fail-safe)');
-    }
-
-    public function test_preview_cookie_is_exempt_from_encryption(): void
-    {
-        // The cookie is set by the bare /smking-preview route but read on the
-        // customer's web-group CMS page. The provider globally exempts it from
-        // EncryptCookies so the customer's middleware doesn't strip the
-        // plaintext cookie as "tampered" on the inbound request. Read the
-        // global static directly (no container resolve — EncryptCookies needs
-        // an encrypter that Testbench doesn't bind without an app key).
-        $prop = new \ReflectionProperty(
-            \Illuminate\Cookie\Middleware\EncryptCookies::class,
-            'neverEncrypt',
-        );
-        $prop->setAccessible(true);
-        $this->assertContains(
-            'smking_preview_token',
-            $prop->getValue(),
-            'smking_preview_token must be globally exempt from EncryptCookies.',
-        );
     }
 }

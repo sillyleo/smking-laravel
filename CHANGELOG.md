@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.20.3 — CMS preview via query param (2026-06-08)
+
+**CMS draft preview now uses a `?smking_preview=` query param instead of a cookie.**
+
+v0.20.2 set a plaintext `smking_preview_token` cookie, which a host app's
+`EncryptCookies` middleware strips as "tampered" on the inbound CMS request — so
+preview silently rendered the published page, and only worked with a fragile
+global `EncryptCookies::except()` exemption that itself needed a php-fpm reload
+(opcache) to take effect. Now `/smking-preview` redirects to
+`{path}?smking_preview={token}` and `CmsClient` reads the token straight off the
+request query. No cookie, no exemption; the preview URL is visibly distinct from
+the live page (tell draft from published at a glance). Install-only, fail-safe
+(no token → plain redirect) — same query-param approach as Statamic. `^0.20`
+gets it automatically.
+
+### Changed
+- `PreviewController` redirects with the token as a `?smking_preview=` query param (was: set cookie).
+- `CmsClient::previewToken()` reads `request()->query('smking_preview')` (was: cookie).
+
+### Removed
+- `SmkingServiceProvider::exemptPreviewCookieFromEncryption()` + the `EncryptCookies` import — no cookie, no exemption needed.
+
 ## v0.20.2 — CMS draft preview (2026-06-08)
 
 **Feature (additive — shipped as a patch): preview unpublished CMS drafts on the real customer page.**

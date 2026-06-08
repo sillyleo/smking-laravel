@@ -42,9 +42,9 @@ class CmsClient
      */
     public function forSlug(string $slug): CmsPage
     {
-        // Draft preview (cookie set by the /smking-preview route) must never
-        // be cached — always fresh, expires with the token. Published reads
-        // keep the 5min cache.
+        // Draft preview (token carried as the ?smking_preview= query param by
+        // the /smking-preview redirect) must never be cached — always fresh,
+        // expires with the token. Published reads keep the 5min cache.
         if ($this->previewToken() !== null) {
             return $this->fetch($slug);
         }
@@ -53,17 +53,19 @@ class CmsClient
     }
 
     /**
-     * Short-lived preview token from the request cookie (set by the SDK's
-     * /smking-preview route). Null outside a request scope or when absent —
-     * fail-open: a normal request just gets the published render.
+     * Short-lived preview token from the `?smking_preview=` query param (set
+     * by the SDK's /smking-preview redirect). Null outside a request scope or
+     * when absent — fail-open: a normal request just gets the published render.
+     * Query param (not cookie) so the customer's EncryptCookies middleware
+     * can't strip it, and the preview URL stays visibly distinct from live.
      */
     private function previewToken(): ?string
     {
         try {
             if (function_exists('request') && ($req = request()) !== null) {
-                $cookie = $req->cookie('smking_preview_token');
-                if (is_string($cookie) && $cookie !== '') {
-                    return $cookie;
+                $token = $req->query('smking_preview');
+                if (is_string($token) && $token !== '') {
+                    return $token;
                 }
             }
         } catch (Throwable) {
