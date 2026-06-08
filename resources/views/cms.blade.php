@@ -1,4 +1,4 @@
-@if($cms->isReady())
+@if($cms->isRenderable())
     {{-- Raw passthrough — bodyHtml is the full Plate-serialized output
          (Tailwind utility + slate-* hooks + data-slate-* attrs intact).
          No article shell, no cms-styles include: what the dashboard

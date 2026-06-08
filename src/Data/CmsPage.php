@@ -31,6 +31,7 @@ namespace Smking\Laravel\Data;
 final class CmsPage
 {
     public const STATUS_READY = 'ready';
+    public const STATUS_PREVIEW = 'preview';
     public const STATUS_PENDING = 'pending';
     public const STATUS_NOT_FOUND = 'not_found';
     public const STATUS_SERVER_ERROR = 'server_error';
@@ -75,7 +76,10 @@ final class CmsPage
         $status = (string) ($payload['status'] ?? self::STATUS_NOT_FOUND);
         $page = $payload['page'] ?? null;
 
-        if ($status !== self::STATUS_READY || ! is_array($page)) {
+        // "preview" (dashboard 預覽 draft) renders through the same body path
+        // as "ready"; only the cache posture differs (CmsClient skips cache
+        // for preview). Any other status is a non-render passthrough.
+        if (! in_array($status, [self::STATUS_READY, self::STATUS_PREVIEW], true) || ! is_array($page)) {
             return new self(status: $status);
         }
 
@@ -93,7 +97,7 @@ final class CmsPage
         }
 
         return new self(
-            status: self::STATUS_READY,
+            status: $status,
             slug: isset($page['slug']) ? (string) $page['slug'] : null,
             title: isset($page['title']) ? (string) $page['title'] : null,
             bodyHtml: $bodyHtml,
@@ -123,6 +127,17 @@ final class CmsPage
     public function isReady(): bool
     {
         return $this->status === self::STATUS_READY;
+    }
+
+    public function isPreview(): bool
+    {
+        return $this->status === self::STATUS_PREVIEW;
+    }
+
+    /** Ready (published) OR preview (draft) — both render the body. */
+    public function isRenderable(): bool
+    {
+        return $this->isReady() || $this->isPreview();
     }
 
     /**

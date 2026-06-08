@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.20.2 — CMS draft preview (2026-06-08)
+
+**Feature (additive — shipped as a patch): preview unpublished CMS drafts on the real customer page.**
+
+The dashboard 預覽 button hands out a short-lived (15min) token; the SDK now
+has a `/smking-preview` route that sets the `smking_preview_token` cookie and
+redirects to the page, where `<x-smking-cms>` renders draftBlocks. Additive
+only, so customers on `^0.20` get it automatically — no constraint change.
+
+- New auto-mounted `GET /smking-preview` route (sets cookie + redirect).
+  Like the webhook/takeover routes, it auto-mounts on `composer require` —
+  **zero customer code**; for `route:cache` add
+  `require base_path('vendor/smking/laravel/routes/preview.php');` to
+  `routes/web.php`. Opt out with `smking.preview.enabled=false`.
+- `CmsClient` detects the `smking_preview_token` request cookie → sends
+  `preview_token` to the API + **skips the cache** for that request.
+- `CmsPage` gains `STATUS_PREVIEW` + `isPreview()` / `isRenderable()`;
+  `<x-smking-cms>` renders both ready and preview.
+
+**Install-only + fail-open:** no token → plain redirect, no cookie; normal
+requests are unaffected (published render, cached as before).
+
 ## v0.20.1 — Drop removed CMS block Blade cases (2026-06-03)
 
 Removed `@case('carousel')`, `@case('nav-recent-posts')`, `@case('nav-search')`,
