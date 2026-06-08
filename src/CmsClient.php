@@ -42,7 +42,35 @@ class CmsClient
      */
     public function forSlug(string $slug): CmsPage
     {
+        // Draft preview (cookie set by the /smking-preview route) must never
+        // be cached — always fresh, expires with the token. Published reads
+        // keep the 5min cache.
+        if ($this->previewToken() !== null) {
+            return $this->fetch($slug);
+        }
+
         return $this->remember($slug, fn (): CmsPage => $this->fetch($slug));
+    }
+
+    /**
+     * Short-lived preview token from the request cookie (set by the SDK's
+     * /smking-preview route). Null outside a request scope or when absent —
+     * fail-open: a normal request just gets the published render.
+     */
+    private function previewToken(): ?string
+    {
+        try {
+            if (function_exists('request') && ($req = request()) !== null) {
+                $cookie = $req->cookie('smking_preview_token');
+                if (is_string($cookie) && $cookie !== '') {
+                    return $cookie;
+                }
+            }
+        } catch (Throwable) {
+            // request scope not bound
+        }
+
+        return null;
     }
 
     private function fetch(string $slug): CmsPage
@@ -84,6 +112,10 @@ class CmsClient
             // Safe fallback if request scope is not bound
         }
 
+        if (($previewToken = $this->previewToken()) !== null) {
+            $queryParams['preview_token'] = $previewToken;
+        }
+
         try {
             $response = $this->http
                 ->connectTimeout($this->httpTimeoutInt($this->connectTimeout()))
@@ -110,7 +142,7 @@ class CmsClient
         }
 
         $status = (string) ($payload['status'] ?? CmsPage::STATUS_NOT_FOUND);
-        if ($status !== CmsPage::STATUS_READY) {
+        if ($status !== CmsPage::STATUS_READY && $status !== CmsPage::STATUS_PREVIEW) {
             return new CmsPage(status: $status);
         }
 

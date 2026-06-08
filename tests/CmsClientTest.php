@@ -201,4 +201,54 @@ class CmsClientTest extends TestCase
         $this->assertStringContainsString('alt="one"', $page->bodyHtml);
         $this->assertStringContainsString('loading="lazy"', $page->bodyHtml);
     }
+
+    public function test_preview_cookie_sends_preview_token_and_renders_preview(): void
+    {
+        $this->app->instance('request', \Illuminate\Http\Request::create(
+            '/blog',
+            'GET',
+            [],
+            ['smking_preview_token' => 'TOK'],
+        ));
+
+        Http::fake([
+            'api.test/api/v1/public/page*' => Http::response([
+                'status' => 'preview',
+                'page' => [
+                    'slug' => 'hello',
+                    'title' => 'Draft Hello',
+                    'bodyHtml' => '<p>DRAFT body</p>',
+                    'publishedAt' => null,
+                ],
+            ], 200),
+        ]);
+
+        $page = $this->app->make(CmsClient::class)->forSlug('hello');
+
+        $this->assertTrue($page->isPreview());
+        $this->assertTrue($page->isRenderable());
+        $this->assertSame('<p>DRAFT body</p>', $page->bodyHtml);
+
+        Http::assertSent(fn ($request) => str_starts_with($request->url(), 'https://api.test/api/v1/public/page')
+            && $request['preview_token'] === 'TOK');
+    }
+
+    public function test_no_preview_cookie_omits_preview_token(): void
+    {
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'page' => [
+                    'slug' => 'hello',
+                    'title' => 'Hello',
+                    'bodyHtml' => '<p>live</p>',
+                    'publishedAt' => null,
+                ],
+            ], 200),
+        ]);
+
+        $this->app->make(CmsClient::class)->forSlug('hello');
+
+        Http::assertSent(fn ($request) => ! isset($request['preview_token']));
+    }
 }

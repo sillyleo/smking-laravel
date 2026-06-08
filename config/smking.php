@@ -473,4 +473,19 @@ return [
         'sitemap' => env('SMKING_TAKEOVER_SITEMAP', true),
         'llms_txt' => env('SMKING_TAKEOVER_LLMS_TXT', true),
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | CMS draft preview (v0.21.0+)
+    |--------------------------------------------------------------------------
+    |
+    | The SDK auto-mounts a `/smking-preview` route (set short-lived cookie +
+    | redirect) so the dashboard 預覽鈕 can show draftBlocks on the real
+    | customer page. Fail-safe: no token → plain redirect, no cookie. Flip to
+    | false to disable the route (e.g. if you own that path).
+    |
+    */
+    'preview' => [
+        'enabled' => env('SMKING_PREVIEW_ENABLED', true),
+    ],
 ];
