@@ -21,11 +21,13 @@ use Illuminate\View\Component;
 class Runtime extends Component
 {
     public string $baseUrl;
+    public ?string $apiKey;
 
-    public function __construct(?string $baseUrl = null)
+    public function __construct(?string $baseUrl = null, ?string $apiKey = null)
     {
         $configured = config('smking.base_url') ?? 'https://smking.app';
         $this->baseUrl = rtrim($baseUrl ?? $configured, '/');
+        $this->apiKey = $apiKey ?? config('smking.api_key');
     }
 
     public function render(): View
