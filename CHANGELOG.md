@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.21.0 — Per-site CMS theme (2026-06-09)
+
+**`<x-smking-runtime>` now mounts a per-site `theme.css` stylesheet.**
+
+The Runtime component resolves `config('smking.api_key')`; when set, it emits
+`<link rel="stylesheet" href="…/api/v1/public/theme.css?key=…">` after
+`runtime.css` so the site's shadcn theme variables override the neutral
+defaults inside the `[data-smking="cms"]` container. No customer code change;
+the link is omitted when no key is configured.
+
 ## v0.20.3 — CMS preview via query param (2026-06-08)
 
 **CMS draft preview now uses a `?smking_preview=` query param instead of a cookie.**
