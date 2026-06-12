@@ -16,11 +16,8 @@ namespace Smking\Laravel\Data;
  * deployments. Exactly one of the two is populated for a ready page.
  *
  * - `blocks` — Block[] shape `{component, id, props}`. cms.blade.php
- *   dispatches each block to its rendered partial. Article blocks
- *   carry pre-rendered HTML in `props.html` (server-rendered by Plate
- *   `serializeHtml` on the SaaS side, so SDK ships zero editor deps).
- *   Other components (hero / nav-taxonomy-list) get markup composed
- *   on the SDK side from the block's props.
+ *   emits bodyHtml raw passthrough; Block[] is legacy shape kept for
+ *   back-compat.
  *
  * - `bodyHtml` — server-rendered HTML produced by tiptap-php
  *   (EditorFactory). Already escaped, safe to print with `{!!` in

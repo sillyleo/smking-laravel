@@ -32,15 +32,22 @@ class WebhookControllerTest extends TestCase
         );
     }
 
+    private function freshPayload(array $overrides = []): array
+    {
+        return array_merge([
+            'deliveredAt' => gmdate('Y-m-d\TH:i:s\Z'),
+            'deliveryId' => bin2hex(random_bytes(16)),
+        ], $overrides);
+    }
+
     public function test_invalid_signature_returns_401(): void
     {
         $response = $this->signedPost(
             'test_secret_abc',
-            [
+            $this->freshPayload([
                 'kind' => 'cms_page',
                 'slugs' => ['hello'],
-                'deliveredAt' => '2026-05-15T10:00:00Z',
-            ],
+            ]),
             'sha256=00deadbeef'.str_repeat('0', 56),
         );
 
@@ -62,9 +69,9 @@ class WebhookControllerTest extends TestCase
 
     public function test_no_kind_returns_200_no_action(): void
     {
-        $response = $this->signedPost('test_secret_abc', [
+        $response = $this->signedPost('test_secret_abc', $this->freshPayload([
             'slugs' => ['hello'],
-        ]);
+        ]));
 
         $response->assertStatus(200);
         $response->assertJsonPath('note', 'no_action_taken');
@@ -72,10 +79,10 @@ class WebhookControllerTest extends TestCase
 
     public function test_unknown_kind_returns_200_no_action(): void
     {
-        $response = $this->signedPost('test_secret_abc', [
+        $response = $this->signedPost('test_secret_abc', $this->freshPayload([
             'kind' => 'future_widget_config',
             'paths' => ['/widgets/abc'],
-        ]);
+        ]));
 
         $response->assertStatus(200);
         $response->assertJsonPath('kind', 'future_widget_config');
@@ -84,11 +91,10 @@ class WebhookControllerTest extends TestCase
 
     public function test_aeo_payload_ack_without_eviction(): void
     {
-        $response = $this->signedPost('test_secret_abc', [
+        $response = $this->signedPost('test_secret_abc', $this->freshPayload([
             'kind' => 'aeo',
             'paths' => ['/products/foo', '/products/bar'],
-            'deliveredAt' => '2026-05-15T10:00:00Z',
-        ]);
+        ]));
 
         $response->assertStatus(200);
         $response->assertJsonPath('kind', 'aeo');
@@ -107,16 +113,84 @@ class WebhookControllerTest extends TestCase
         Cache::put($helloKey, 'stale_hello', 300);
         Cache::put($aboutKey, 'stale_about', 300);
 
-        $response = $this->signedPost('test_secret_abc', [
+        $response = $this->signedPost('test_secret_abc', $this->freshPayload([
             'kind' => 'cms_page',
             'slugs' => ['hello', 'about'],
-            'deliveredAt' => '2026-05-15T10:00:00Z',
-        ]);
+        ]));
 
         $response->assertStatus(200);
         $response->assertJsonPath('kind', 'cms_page');
         $response->assertJsonPath('evicted', 2);
         $this->assertNull(Cache::get($helloKey));
         $this->assertNull(Cache::get($aboutKey));
+    }
+
+    public function test_replayed_delivery_id_returns_401(): void
+    {
+        $payload = $this->freshPayload([
+            'kind' => 'cms_page',
+            'slugs' => ['hello'],
+        ]);
+
+        $first = $this->signedPost('test_secret_abc', $payload);
+        $first->assertStatus(200);
+
+        // Identical payload + signature — the intercepted-and-replayed case.
+        $replay = $this->signedPost('test_secret_abc', $payload);
+        $replay->assertStatus(401);
+        $replay->assertJsonPath('error', 'duplicate_delivery');
+    }
+
+    public function test_stale_delivered_at_returns_401(): void
+    {
+        $response = $this->signedPost('test_secret_abc', $this->freshPayload([
+            'kind' => 'cms_page',
+            'slugs' => ['hello'],
+            'deliveredAt' => gmdate('Y-m-d\TH:i:s\Z', time() - 360),
+        ]));
+
+        $response->assertStatus(401);
+        $response->assertJsonPath('error', 'stale_delivery');
+    }
+
+    public function test_future_delivered_at_beyond_window_returns_401(): void
+    {
+        $response = $this->signedPost('test_secret_abc', $this->freshPayload([
+            'kind' => 'cms_page',
+            'slugs' => ['hello'],
+            'deliveredAt' => gmdate('Y-m-d\TH:i:s\Z', time() + 360),
+        ]));
+
+        $response->assertStatus(401);
+        $response->assertJsonPath('error', 'stale_delivery');
+    }
+
+    public function test_missing_delivered_at_returns_401(): void
+    {
+        $response = $this->signedPost('test_secret_abc', [
+            'kind' => 'cms_page',
+            'slugs' => ['hello'],
+            'deliveryId' => bin2hex(random_bytes(16)),
+        ]);
+
+        $response->assertStatus(401);
+        $response->assertJsonPath('error', 'stale_delivery');
+    }
+
+    public function test_missing_delivery_id_tolerated_window_only(): void
+    {
+        // Old SaaS payload shape (pre-deliveryId) — must keep working;
+        // the deliveredAt window is the only replay defense for these.
+        $payload = [
+            'kind' => 'cms_page',
+            'slugs' => ['hello'],
+            'deliveredAt' => gmdate('Y-m-d\TH:i:s\Z'),
+        ];
+
+        $first = $this->signedPost('test_secret_abc', $payload);
+        $first->assertStatus(200);
+
+        $again = $this->signedPost('test_secret_abc', $payload);
+        $again->assertStatus(200);
     }
 }
