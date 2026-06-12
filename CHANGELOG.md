@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.21.1 — Webhook replay protection (2026-06-12)
+
+**Security (review M6): the webhook endpoint now rejects replayed deliveries.**
+
+A signed webhook is only accepted while its `deliveredAt` sits inside a
+±5-minute window (401 `stale_delivery`; a missing field counts as stale — the
+SaaS has sent it since v0.11), and a `deliveryId` already seen within that
+window is rejected via atomic `Cache::add(…, 300)` on the configured smking
+cache store (401 `duplicate_delivery`). The SaaS now stamps every delivery
+with a unique `deliveryId`; payloads from a SaaS predating the field skip
+dedup and keep working — the time window is the primary defense. Both fields
+sit inside the HMAC-signed JSON body, so an attacker can't forge or strip
+them. No customer action needed; `^0.21` updates automatically.
+
+### Changed
+- `WebhookController` enforces the `deliveredAt` freshness window and dedupes `deliveryId` before dispatching by `kind`.
+
+### Removed
+- Legacy `resources/views/block.blade.php` partial — dead code since both render modes consume `bodyHtml` (confirmed in the shadcn elements migration); `<x-smking-cms />` output is unchanged.
+
 ## v0.21.0 — Per-site CMS theme (2026-06-09)
 
 **`<x-smking-runtime>` now mounts a per-site `theme.css` stylesheet.**
