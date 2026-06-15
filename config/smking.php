@@ -286,10 +286,17 @@ return [
         'circuit_prefix' => 'smking:circuit:',
 
         // CMS surface (v0.11.0+) — separate cache namespace from AEO so a
-        // CMS publish doesn't invalidate AEO and vice versa. Shorter TTL
-        // because CMS edits are user-driven (more frequent than the
-        // SaaS-driven AEO crawl output).
-        'cms_ttl' => env('SMKING_CMS_TTL', 300),
+        // CMS publish doesn't invalidate AEO and vice versa.
+        //
+        // Default 3600s (raised from 300s): the public CMS read endpoint
+        // is a cold path (hit only on cache miss, ~once per TTL cycle) and
+        // every miss pays the SaaS function→DB round-trip, so a longer TTL
+        // means fewer visitors ever wait on it. Freshness is preserved —
+        // publish fires a webhook that evicts this namespace immediately
+        // (POST /api/smking/webhook), so edits appear on the next request
+        // regardless of TTL. The TTL only governs the fallback ceiling for
+        // when the webhook can't land (air-gapped deploy / webhook disabled).
+        'cms_ttl' => env('SMKING_CMS_TTL', 3600),
         'cms_prefix' => 'smking:cms:',
 
         // CMS failure TTLs are deliberately SHORTER than AEO defaults

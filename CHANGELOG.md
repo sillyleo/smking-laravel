@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.21.2 — Longer default CMS cache TTL (2026-06-15)
+
+**`cms_ttl` default raised 300s → 3600s — fewer visitors ever wait on a cold CMS read.**
+
+The public CMS read endpoint is a cold path: it's only hit on a cache miss
+(~once per TTL cycle) and each miss pays the SaaS function→DB round-trip. A
+longer default TTL means fewer visitors ever land on that miss. Freshness is
+NOT traded away — publishing a page fires a webhook that evicts the CMS cache
+namespace immediately (`POST /api/smking/webhook`), so edits still appear on
+the next request regardless of TTL. The TTL only governs the fallback ceiling
+for when the webhook can't land (air-gapped deploy / `webhook.enabled=false`).
+Failure caching is unchanged (15s for not_found / server_error), so a cold
+first hit still retries quickly. No customer action needed; `^0.21` updates
+automatically. Override per-site with `SMKING_CMS_TTL` to keep the old 300s.
+
+> If you've run `php artisan vendor:publish` for the smking config, bump
+> `cms_ttl` in your published `config/smking.php` too — the package default
+> only applies when the config isn't published.
+
+### Changed
+- `config/smking.php`: `cms_ttl` default `env('SMKING_CMS_TTL', 300)` → `env('SMKING_CMS_TTL', 3600)`.
+
 ## v0.21.1 — Webhook replay protection (2026-06-12)
 
 **Security (review M6): the webhook endpoint now rejects replayed deliveries.**
