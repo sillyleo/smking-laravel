@@ -177,6 +177,40 @@ class InjectAeoMiddlewareTest extends TestCase
         $this->assertSame(1, preg_match_all('/rel="canonical"/i', $html));
     }
 
+    public function test_overrides_existing_json_ld_scripts(): void
+    {
+        Http::fake([
+            '*' => Http::response([
+                'status' => 'ready',
+                'jsonLd' => ['@type' => 'Product', 'name' => 'API Widget'],
+            ], 200),
+        ]);
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $request = Request::create('/products/widget', 'GET');
+        $response = $middleware->handle($request, function () {
+            return new Response(
+                '<html><head>'
+                .'<script type="application/ld+json">{"@type":"Product","name":"Host Product"}</script>'
+                .'<script data-x="1" type="application/ld+json">{"@type":"Organization","name":"Host Org"}</script>'
+                .'<script type="application/json">{"name":"Keep Me"}</script>'
+                .'</head><body>x</body></html>',
+                200,
+                ['Content-Type' => 'text/html'],
+            );
+        });
+
+        $html = (string) $response->getContent();
+
+        $this->assertStringNotContainsString('Host Product', $html);
+        $this->assertStringNotContainsString('Host Org', $html);
+        $this->assertStringContainsString('"name":"API Widget"', $html);
+        $this->assertStringContainsString('type="application/json">{"name":"Keep Me"}', $html);
+        $this->assertStringContainsString('data-smking="aeo"', $html);
+        $this->assertSame(1, preg_match_all('/type="application\/ld\+json"/i', $html));
+    }
+
     public function test_seo_flags_disable_individual_tags(): void
     {
         config()->set('smking.inject.seo_title', false);
@@ -310,6 +344,27 @@ class InjectAeoMiddlewareTest extends TestCase
         $this->assertSame('disabled', $response->headers->get('X-Smking-Status'));
         $this->assertSame('/some-path', $response->headers->get('X-Smking-Path'));
         // No API call when disabled — the middleware short-circuits.
+        Http::assertNothingSent();
+    }
+
+    public function test_origin_bypass_returns_unmodified_html_without_backend_call(): void
+    {
+        Http::fake();
+
+        $middleware = $this->app->make(InjectAeo::class);
+
+        $original = '<html><head><title>Host</title></head><body><h1>Original</h1></body></html>';
+        $request = Request::create('/products/widget', 'GET', [], [], [], [
+            'HTTP_X_SMKING_ORIGIN_MODE' => 'raw',
+        ]);
+        $response = $middleware->handle($request, function () use ($original) {
+            return new Response($original, 200, ['Content-Type' => 'text/html']);
+        });
+
+        $this->assertSame($original, $response->getContent());
+        $this->assertSame('origin_bypass', $response->headers->get('X-Smking-Status'));
+        $this->assertSame('/products/widget', $response->headers->get('X-Smking-Path'));
+        $this->assertStringNotContainsString('data-smking-injected', (string) $response->getContent());
         Http::assertNothingSent();
     }
 
