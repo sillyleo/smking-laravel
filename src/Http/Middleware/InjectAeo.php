@@ -51,6 +51,15 @@ class InjectAeo
 
         $path = $this->normalizePath($request);
 
+        // smking SaaS uses this when it needs the true customer-origin
+        // document for original-vs-enhanced audits. Return before any backend
+        // lookup or HTML rewrite so the body is exactly what the app rendered.
+        if ($this->wantsOriginBypass($request)) {
+            $this->emitHeaders($response, 'origin_bypass', $path);
+
+            return $response;
+        }
+
         // auto_inject=false: emit verification headers but never touch HTML.
         // The middleware still registers in v0.2.0 so doctor + curl -I work
         // even when injection is disabled.
@@ -244,6 +253,7 @@ class InjectAeo
         if (($flags['json_ld'] ?? true) && $aeo->jsonLd !== null) {
             $json = json_encode($aeo->jsonLd, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
             if (is_string($json)) {
+                $html = $this->stripJsonLdScripts($html);
                 $headFragments[] = '<script type="application/ld+json" data-smking="aeo">'.$this->safeScript($json).'</script>';
             }
         }
@@ -505,6 +515,26 @@ class InjectAeo
     }
 
     /**
+     * Full AEO takeover: once smking has generated JSON-LD for this page,
+     * remove host-provided JSON-LD scripts before injecting ours. This avoids
+     * duplicate Product / FAQ / Organization facts fighting in crawler output.
+     */
+    private function stripJsonLdScripts(string $html): string
+    {
+        $result = preg_replace_callback(
+            '/<script\b[^>]*>.*?<\/script>/is',
+            static function (array $match): string {
+                $typePattern = '/\btype\s*=\s*(?:(["\'])application\/ld\+json(?:\s*;[^"\']*)?\1|application\/ld\+json[^\s>]*)/i';
+
+                return preg_match($typePattern, $match[0]) === 1 ? '' : $match[0];
+            },
+            $html,
+        );
+
+        return $result ?? $html;
+    }
+
+    /**
      * Quality-aware Accept-header check for `text/markdown`. Returns true
      * only when the client *explicitly* asked for markdown AND its q-value
      * is at least as high as text/html / *\/* (so a browser sending
@@ -584,6 +614,11 @@ class InjectAeo
         // but it matches what most agent clients expect: list the format
         // you actually want first).
         return $mdQ === $htmlQ && $mdIndex < $htmlIndex;
+    }
+
+    private function wantsOriginBypass(Request $request): bool
+    {
+        return strtolower(trim((string) $request->headers->get('X-Smking-Origin-Mode', ''))) === 'raw';
     }
 
     /**

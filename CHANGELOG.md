@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.21.3 — JSON-LD takeover parity + origin audit bypass (2026-07-03)
+
+**AEO JSON-LD now fully takes over host JSON-LD when smking has ready output.**
+
+When the middleware receives ready AEO JSON-LD from the SaaS, it strips existing
+`<script type="application/ld+json">` tags from the host page before injecting
+the smking-managed script. This matches the existing title / meta / Open Graph /
+canonical override model and prevents duplicate Product / FAQ / Organization
+blocks from fighting in crawler output. Non-JSON scripts are untouched; pages
+without ready smking JSON-LD keep the host markup unchanged.
+
+No config change required. Customers already on `^0.21` pick this up with
+`composer update smking/laravel`.
+
+This release also honors `X-Smking-Origin-Mode: raw`. Page Zero uses that
+header when it needs the true host-rendered HTML for original-vs-enhanced
+audits; the middleware returns before any SaaS lookup or HTML rewrite and emits
+`X-Smking-Status: origin_bypass`.
+
+### Changed
+- `InjectAeo` removes host JSON-LD scripts before injecting
+  `data-smking="aeo"` JSON-LD.
+- `InjectAeo` skips all AEO work for raw-origin audit fetches.
+
 ## v0.21.2 — Longer default CMS cache TTL (2026-06-15)
 
 **`cms_ttl` default raised 300s → 3600s — fewer visitors ever wait on a cold CMS read.**
