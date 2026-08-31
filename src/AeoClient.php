@@ -35,15 +35,15 @@ class AeoClient
      */
     public function forPath(string $path, ?string $url = null): AeoResponse
     {
-        return $this->remember(['path' => $path], function () use ($path, $url) {
-            return $this->discover(['path' => $path, 'url' => $url]);
+        return $this->remember(['path' => $path], function (callable $onTransportFailure) use ($path, $url) {
+            return $this->discover(['path' => $path, 'url' => $url], $onTransportFailure);
         });
     }
 
     public function forProductId(int $productId): AeoResponse
     {
-        return $this->remember(['product_id' => $productId], function () use ($productId) {
-            return $this->discover(['product_id' => $productId]);
+        return $this->remember(['product_id' => $productId], function (callable $onTransportFailure) use ($productId) {
+            return $this->discover(['product_id' => $productId], $onTransportFailure);
         });
     }
 
@@ -256,8 +256,10 @@ class AeoClient
 
     /**
      * @param  array{path?: string, url?: ?string, product_id?: int}  $body
+     * @param  null|callable(): bool  $onTransportFailure  Returns true only
+     *         when this request may spend the cold-start retry budget.
      */
-    private function discover(array $body): AeoResponse
+    private function discover(array $body, ?callable $onTransportFailure = null): AeoResponse
     {
         $apiKey = $this->apiKey();
         if ($apiKey === null) {
@@ -290,6 +292,15 @@ class AeoClient
         // protects the FPM pool on high-traffic sites.
         $response = $this->postDiscover($payload, $this->connectTimeout(), $this->readTimeout());
 
+        // A transport failure means the upstream path is already unhealthy,
+        // even when the optional cold-start retry later receives a valid 4xx.
+        // Open the namespace circuit before retrying so concurrent requests
+        // for other paths do not each consume their own retry budget.
+        $mayRetry = true;
+        if ($response === null && $onTransportFailure !== null) {
+            $mayRetry = (bool) $onTransportFailure();
+        }
+
         // Cold-start retry (v0.19.0): low-traffic / newly-launched / off-peak
         // sites don't keep the upstream serverless function warm, so AEO is
         // effectively a cold path (3-5s first-hit) despite the hot-path
@@ -299,7 +310,7 @@ class AeoClient
         // attempt succeeds) so steady-state latency is unaffected. A genuinely
         // dead upstream fails both attempts → serverError() → the existing
         // adaptive backoff + circuit breaker take over.
-        if ($response === null && $this->coldStartRetryEnabled()) {
+        if ($response === null && $mayRetry && $this->coldStartRetryEnabled()) {
             $response = $this->postDiscover(
                 $payload,
                 $this->coldStartConnectTimeout(),
@@ -479,7 +490,7 @@ class AeoClient
 
     /**
      * @param  array<string, scalar>  $keyParts
-     * @param  callable(): AeoResponse  $resolver
+     * @param  callable(callable(): bool): AeoResponse  $resolver
      */
     private function remember(array $keyParts, callable $resolver): AeoResponse
     {
@@ -488,7 +499,7 @@ class AeoClient
         $ttl = (int) ($cacheConfig['ttl'] ?? 3600);
 
         if (! $enabled || $ttl <= 0) {
-            return $resolver();
+            return $resolver(static fn (): bool => true);
         }
 
         $store = $cacheConfig['store'] ?? null;
@@ -523,7 +534,13 @@ class AeoClient
         // (cache stampede / thundering herd). One worker takes a short lock
         // and does the upstream fetch + cache write; others fail open so
         // worker pool stays healthy.
-        return $this->singleFlight($repository, $cacheKey, $resolver, function (AeoResponse $response) use ($repository, $cacheKey, $cacheConfig, $ttl): void {
+        $transportAwareResolver = fn (): AeoResponse => $resolver(
+            function () use ($repository): bool {
+                return $this->tripCircuit($repository, 'aeo');
+            },
+        );
+
+        return $this->singleFlight($repository, $cacheKey, $transportAwareResolver, function (AeoResponse $response) use ($repository, $cacheKey, $cacheConfig, $ttl): void {
             // Four-tier TTL with adaptive server_error backoff (v0.10.0):
             //   ready        → full ttl (default 1hr)
             //   not_found    → not_found_ttl (default 15min)
@@ -563,7 +580,9 @@ class AeoClient
             // whatever stage a long-ago failure left it.
             if ($response->status === AeoResponse::STATUS_READY) {
                 $this->resetFailureCount($repository, $cacheKey);
-                $this->maybeLogCircuitClosed($repository, 'aeo');
+                if (! $this->circuitOpen($repository, 'aeo')) {
+                    $this->maybeLogCircuitClosed($repository, 'aeo');
+                }
             }
         });
     }
@@ -613,12 +632,14 @@ class AeoClient
 
     /**
      * @param  'aeo'|'md'  $surface
+     * @return bool True when this call opened the circuit (or the breaker is
+     *              disabled), false when another request already opened it.
      */
-    private function tripCircuit(\Illuminate\Contracts\Cache\Repository $repository, string $surface): void
+    private function tripCircuit(\Illuminate\Contracts\Cache\Repository $repository, string $surface): bool
     {
         $cacheConfig = $this->config->get('smking.cache', []);
         if (! ($cacheConfig['circuit_breaker'] ?? true)) {
-            return;
+            return true;
         }
 
         $key = $this->circuitKey($surface);
@@ -647,6 +668,11 @@ class AeoClient
                 'key' => $key,
             ]);
         }
+
+        // The first transport failure owns the single cold-start retry.
+        // In-flight requests that fail after the breaker is already open
+        // must stop immediately instead of each spending the long retry.
+        return ! $alreadyOpen;
     }
 
     /**
@@ -776,8 +802,10 @@ class AeoClient
      * upstream.
      *
      * Lock contention is not an error — it just means another worker is
-     * doing the work. The lock TTL is short (slightly longer than the read
-     * timeout) so a crashed worker doesn't permanently block the key.
+     * doing the work. The lock TTL covers every enabled HTTP attempt plus a
+     * small release margin, so it cannot expire while a cold-start retry is
+     * still running. It remains bounded so a crashed worker cannot
+     * permanently block the key.
      *
      * @param  callable(): AeoResponse  $resolver  upstream call (only the
      *         lock-holder runs this)
@@ -807,7 +835,11 @@ class AeoClient
         }
 
         $lockKey = $cacheKey.':lock';
-        $lockTtl = max(5, (int) ceil($this->readTimeout() + $this->connectTimeout() + 2));
+        $requestBudget = $this->readTimeout() + $this->connectTimeout();
+        if ($this->coldStartRetryEnabled()) {
+            $requestBudget += $this->coldStartTimeout() + $this->coldStartConnectTimeout();
+        }
+        $lockTtl = max(5, (int) ceil($requestBudget + 2));
 
         // Repository::__call routes lock() to the store, which is fine —
         // we already gated on supportsLock() above.

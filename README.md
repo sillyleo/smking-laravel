@@ -198,7 +198,7 @@ Two complementary defenses run on every cache miss:
 
 **Single-flight cache lock** — When a path is uncached and traffic spikes, only ONE PHP-FPM worker calls smking upstream; others fail open immediately (return un-injected page). Per-path protection. Uses `Cache::lock()` (redis / memcached / database / array drivers; graceful fallback for stores without lock support).
 
-**Per-surface circuit breaker** — Once any path hits a 5xx / transport error, a flag is set for `circuit_breaker_ttl` seconds (default 60). While the flag is present, every path on THAT surface short-circuits without touching the upstream. Protects against high-cardinality outage events (catalog spray, full-site crawler) where per-path cache wouldn't help — the second URL in the burst doesn't know the first one just failed. Auto half-open: when the flag expires the next request hits upstream; success closes the breaker, another failure trips it again. Disable with `SMKING_CIRCUIT_BREAKER=false` if your customer cache layer can't store namespace flags reliably.
+**Per-surface circuit breaker** — Once any path hits a 5xx / transport error, a flag is set for `circuit_breaker_ttl` seconds (default 60). A transport failure opens it before the optional cold-start retry; only the request that first opened the circuit may retry, so overlapping workers cannot all spend the long retry budget. While the flag is present, every other path on THAT surface short-circuits without touching the upstream. Protects against high-cardinality outage events (catalog spray, full-site crawler) where per-path cache wouldn't help — the second URL in the burst doesn't know the first one just failed. Auto half-open: when the flag expires the next request hits upstream; success closes the breaker, another failure trips it again. Disable with `SMKING_CIRCUIT_BREAKER=false` if your customer cache layer can't store namespace flags reliably.
 
 Two independent breakers exist (since v0.7.0 round-4):
 
@@ -247,6 +247,12 @@ Set in `.env` and clear config cache:
 
 ```dotenv
 SMKING_AUTO_INJECT=false
+```
+
+Rebuild Laravel's production config cache after editing `.env`:
+
+```bash
+php artisan config:cache
 ```
 
 Middleware still emits `X-Smking-Status` headers (so `curl -I` install verification works) but doesn't try to fetch any content. Reverts to original page entirely.

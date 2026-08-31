@@ -431,6 +431,40 @@ class AeoClientTest extends TestCase
         Http::assertSentCount(2);
     }
 
+    public function test_single_flight_lock_covers_cold_start_retry_budget(): void
+    {
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cold_start_retry', true);
+
+        $attempts = 0;
+        $nestedStatus = null;
+        $client = $this->app->make(AeoClient::class);
+
+        Http::fake([
+            'api.test/api/v1/public/aeo' => function () use (&$attempts, &$nestedStatus, $client) {
+                $attempts++;
+
+                if ($attempts === 1) {
+                    // Simulate a slow first request while its single-flight
+                    // lock is held, then re-enter the public API from another
+                    // page request. The default cold-retry budget exceeds 5s.
+                    $this->travel(6)->seconds();
+                    $nestedStatus = $client->forPath('/same-path')->status;
+                }
+
+                return Http::response(['status' => 'not_found'], 404);
+            },
+        ]);
+
+        $outer = $client->forPath('/same-path');
+
+        $this->assertSame(
+            [AeoResponse::STATUS_NOT_FOUND, AeoResponse::STATUS_NOT_FOUND, 1],
+            [$outer->status, $nestedStatus, $attempts],
+            'the same path must not start another upstream call while the first request can still be retrying',
+        );
+    }
+
     public function test_single_flight_falls_back_when_driver_lacks_lock(): void
     {
         // Defensive: if a customer's cache repository doesn't expose
@@ -971,6 +1005,104 @@ class AeoClientTest extends TestCase
         $this->assertTrue($response->isReady(), 'cold-start retry must recover a first-attempt timeout');
         $this->assertSame('Widget', $response->jsonLd['name']);
         $this->assertSame(2, $attempts, 'first attempt times out, retry succeeds → exactly 2 upstream calls');
+    }
+
+    public function test_first_attempt_timeout_opens_circuit_even_when_retry_returns_not_found(): void
+    {
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cache.circuit_breaker', true);
+        config()->set('smking.cold_start_retry', true);
+
+        $attempts = 0;
+        Http::fake([
+            'api.test/api/v1/public/aeo' => function () use (&$attempts) {
+                $attempts++;
+                if ($attempts === 1) {
+                    throw new \Illuminate\Http\Client\ConnectionException('read timeout');
+                }
+
+                return Http::response(['status' => 'not_found'], 404);
+            },
+        ]);
+
+        $client = $this->app->make(AeoClient::class);
+        $first = $client->forPath('/product-a');
+        $second = $client->forPath('/product-b');
+
+        $this->assertSame(
+            [AeoResponse::STATUS_NOT_FOUND, AeoResponse::STATUS_SERVER_ERROR, 2],
+            [$first->status, $second->status, $attempts],
+            'a transport timeout must open the namespace circuit before its retry completes',
+        );
+    }
+
+    public function test_only_first_in_flight_transport_failure_gets_cold_start_retry(): void
+    {
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cache.circuit_breaker', true);
+        config()->set('smking.cold_start_retry', true);
+
+        $attempts = 0;
+        $nestedStatus = null;
+        $client = $this->app->make(AeoClient::class);
+
+        Http::fake([
+            'api.test/api/v1/public/aeo' => function () use (&$attempts, &$nestedStatus, $client) {
+                $attempts++;
+
+                if ($attempts === 1) {
+                    // A second path enters before the outer path's first
+                    // attempt has failed, reproducing concurrent FPM workers.
+                    $nestedStatus = $client->forPath('/product-b')->status;
+                    throw new \Illuminate\Http\Client\ConnectionException('outer request timed out later');
+                }
+
+                if ($attempts === 2) {
+                    throw new \Illuminate\Http\Client\ConnectionException('nested request timed out first');
+                }
+
+                return Http::response(['status' => 'not_found'], 404);
+            },
+        ]);
+
+        $outer = $client->forPath('/product-a');
+
+        $this->assertSame(
+            [AeoResponse::STATUS_SERVER_ERROR, AeoResponse::STATUS_NOT_FOUND, 3],
+            [$outer->status, $nestedStatus, $attempts],
+            'only the request that opens the circuit may spend the cold-start retry budget',
+        );
+    }
+
+    public function test_successful_retry_does_not_report_circuit_closed_while_it_remains_open(): void
+    {
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cache.circuit_breaker', true);
+        config()->set('smking.cold_start_retry', true);
+        $handler = $this->swapInTestLogger();
+
+        $attempts = 0;
+        Http::fake([
+            'api.test/api/v1/public/aeo' => function () use (&$attempts) {
+                $attempts++;
+                if ($attempts === 1) {
+                    throw new \Illuminate\Http\Client\ConnectionException('cold start read timeout');
+                }
+
+                return Http::response([
+                    'status' => 'ready',
+                    'jsonLd' => ['@type' => 'Product'],
+                ], 200);
+            },
+        ]);
+
+        $response = $this->app->make(AeoClient::class)->forPath('/product-a');
+
+        $this->assertSame(
+            [true, false],
+            [$response->isReady(), $handler->hasInfoThatContains('circuit closed for aeo surface')],
+            'a recovered retry may serve the current path but must not report an open circuit as closed',
+        );
     }
 
     public function test_cold_start_retry_disabled_collapses_to_server_error_on_first_timeout(): void

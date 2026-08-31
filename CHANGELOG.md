@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.21.4 — AEO timeout amplification hardening (2026-08-31)
+
+**A single transport timeout now protects the whole AEO surface before the
+cold-start retry begins.** Previously, the circuit breaker opened only after
+the retry also failed or returned a 5xx. If the retry instead returned a valid
+4xx such as `404 not_found`, every distinct page path could repeat the full
+connect + read + cold-retry budget and exhaust a PHP-FPM pool during an
+intermittent upstream or network incident.
+
+### Changed
+- Open the AEO circuit immediately after the first DNS / TCP / read timeout,
+  while still allowing the request that opened it to make the one configured
+  cold-start retry.
+- Allow only the first in-flight transport failure to retry; requests that
+  fail after another worker opened the circuit return `server_error`
+  immediately.
+- Size the per-path single-flight lock for the complete enabled request +
+  retry budget instead of only the first attempt.
+- Keep recovery logging honest: a successful retry can serve its current page,
+  but no longer emits `circuit closed` while the breaker flag remains open.
+- Add public-seam regressions for timeout → retry 404, overlapping in-flight
+  failures, successful retry logging, and lock expiry during the retry window.
+
 ## v0.21.3 — JSON-LD takeover parity + origin audit bypass (2026-07-03)
 
 **AEO JSON-LD now fully takes over host JSON-LD when smking has ready output.**
