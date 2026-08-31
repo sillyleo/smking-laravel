@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Smking\Laravel\Tests;
 
+use Illuminate\Cache\Repository as CacheRepository;
+use Illuminate\Contracts\Cache\Factory as CacheFactory;
 use Illuminate\Support\Facades\Http;
 use Smking\Laravel\AeoClient;
 use Smking\Laravel\Data\AeoResponse;
@@ -1074,6 +1076,58 @@ class AeoClientTest extends TestCase
         );
     }
 
+    public function test_concurrent_transport_failures_allow_only_one_cold_start_retry(): void
+    {
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cache.circuit_breaker', true);
+        config()->set('smking.cold_start_retry', true);
+
+        $store = new InterleavingCircuitClaimStore();
+        $repository = new CacheRepository($store);
+        $cache = new class($repository) implements CacheFactory
+        {
+            public function __construct(private readonly CacheRepository $repository)
+            {
+            }
+
+            public function store($name = null): CacheRepository
+            {
+                return $this->repository;
+            }
+        };
+
+        $client = new AeoClient(
+            http: $this->app->make(\Illuminate\Http\Client\Factory::class),
+            cache: $cache,
+            config: $this->app->make(\Illuminate\Contracts\Config\Repository::class),
+        );
+
+        $attempts = 0;
+        $nestedStatus = null;
+        Http::fake([
+            'api.test/api/v1/public/aeo' => function () use (&$attempts) {
+                $attempts++;
+                if ($attempts <= 2) {
+                    throw new \Illuminate\Http\Client\ConnectionException('synchronized read timeout');
+                }
+
+                return Http::response(['status' => 'not_found'], 404);
+            },
+        ]);
+
+        $store->interleaveFirstCircuitClaim(function () use ($client, &$nestedStatus): void {
+            $nestedStatus = $client->forPath('/product-b')->status;
+        });
+
+        $outer = $client->forPath('/product-a');
+
+        $this->assertSame(
+            [AeoResponse::STATUS_SERVER_ERROR, AeoResponse::STATUS_NOT_FOUND, 3],
+            [$outer->status, $nestedStatus, $attempts],
+            'two workers timing out together must atomically select exactly one cold-start retry owner',
+        );
+    }
+
     public function test_successful_retry_does_not_report_circuit_closed_while_it_remains_open(): void
     {
         config()->set('smking.cache.enabled', true);
@@ -1181,5 +1235,62 @@ class AeoClientTest extends TestCase
 
         $this->assertSame(AeoResponse::STATUS_SERVER_ERROR, $response->status);
         $this->assertSame(1, $attempts, '5xx is a transport success → no cold-start retry');
+    }
+}
+
+/**
+ * Cache boundary fake that deterministically interleaves two circuit claims.
+ *
+ * A get-then-put implementation receives a stale "missing" result after the
+ * nested request has already opened the circuit. An atomic add implementation
+ * instead lets the nested request win and returns false to the outer request.
+ */
+final class InterleavingCircuitClaimStore extends \Illuminate\Cache\ArrayStore
+{
+    private int $circuitReads = 0;
+
+    private bool $raceTriggered = false;
+
+    private ?\Closure $onFirstClaim = null;
+
+    public function interleaveFirstCircuitClaim(\Closure $callback): void
+    {
+        $this->onFirstClaim = $callback;
+    }
+
+    public function get($key)
+    {
+        if ($this->isAeoCircuitKey($key)) {
+            $this->circuitReads++;
+
+            if (! $this->raceTriggered && $this->circuitReads === 2) {
+                $this->raceTriggered = true;
+                $staleValue = parent::get($key);
+                ($this->onFirstClaim)();
+
+                return $staleValue;
+            }
+        }
+
+        return parent::get($key);
+    }
+
+    public function add($key, $value, $seconds)
+    {
+        if ($this->isAeoCircuitKey($key) && ! $this->raceTriggered) {
+            $this->raceTriggered = true;
+            ($this->onFirstClaim)();
+        }
+
+        if (parent::get($key) !== null) {
+            return false;
+        }
+
+        return parent::put($key, $value, $seconds);
+    }
+
+    private function isAeoCircuitKey(mixed $key): bool
+    {
+        return is_string($key) && str_starts_with($key, 'smking:circuit:aeo:');
     }
 }
