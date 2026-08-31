@@ -1009,6 +1009,154 @@ class AeoClientTest extends TestCase
         $this->assertSame(2, $attempts, 'first attempt times out, retry succeeds → exactly 2 upstream calls');
     }
 
+    public function test_retry_reuses_correlation_id_and_logs_one_structured_discovery_event(): void
+    {
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cache.circuit_breaker', true);
+        config()->set('smking.cold_start_retry', true);
+        $handler = $this->swapInTestLogger();
+
+        $attempts = 0;
+        $requestIds = [];
+        $attemptHeaders = [];
+        Http::fake([
+            'api.test/api/v1/public/aeo' => function ($request) use (&$attempts, &$requestIds, &$attemptHeaders) {
+                $attempts++;
+                $requestIds[] = $request->header('X-Smking-Request-Id')[0] ?? null;
+                $attemptHeaders[] = $request->header('X-Smking-Attempt')[0] ?? null;
+                if ($attempts === 1) {
+                    throw new \Illuminate\Http\Client\ConnectionException('cold start read timeout');
+                }
+
+                return Http::response([
+                    'status' => 'ready',
+                    'jsonLd' => ['@type' => 'Product'],
+                ], 200);
+            },
+        ]);
+
+        $response = $this->app->make(AeoClient::class)
+            ->forPath('/must-not-appear-in-telemetry');
+
+        $this->assertTrue($response->isReady());
+        $this->assertCount(2, $requestIds);
+        $this->assertMatchesRegularExpression('/^[a-f0-9]{32}$/', (string) $requestIds[0]);
+        $this->assertSame([$requestIds[0], $requestIds[0]], $requestIds);
+        $this->assertSame(['1', '2'], $attemptHeaders);
+
+        $events = array_values(array_filter(
+            $handler->getRecords(),
+            fn ($record) => ($record['context']['event'] ?? null) === 'aeo_discovery',
+        ));
+        $this->assertCount(1, $events, 'one logical discovery must emit one structured event');
+        $context = $events[0]['context'];
+        $this->assertSame($requestIds[0], $context['request_id']);
+        $this->assertSame(2, $context['attempt_count']);
+        $this->assertSame(['timeout', 'http_2xx'], $context['attempt_outcomes']);
+        $this->assertSame([200], $context['http_statuses']);
+        $this->assertSame('opened_retry_owner', $context['circuit_action']);
+        $this->assertSame(AeoResponse::STATUS_READY, $context['final_status']);
+        $this->assertIsInt($context['duration_ms']);
+        $this->assertStringNotContainsString(
+            '/must-not-appear-in-telemetry',
+            json_encode($context, JSON_THROW_ON_ERROR),
+        );
+    }
+
+    public function test_failed_discovery_outbox_is_bounded_and_piggybacks_once(): void
+    {
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cache.circuit_breaker', false);
+        config()->set('smking.cold_start_retry', false);
+
+        $attempts = 0;
+        $successfulPayloads = [];
+        Http::fake([
+            'api.test/api/v1/public/aeo' => function ($request) use (&$attempts, &$successfulPayloads) {
+                $attempts++;
+                if ($attempts <= 25) {
+                    throw new \Illuminate\Http\Client\ConnectionException('timeout');
+                }
+
+                $successfulPayloads[] = $request->data();
+
+                return Http::response(
+                    ['status' => 'not_found'],
+                    404,
+                    ['X-Smking-Request-Id' => $request->header('X-Smking-Request-Id')[0] ?? ''],
+                );
+            },
+        ]);
+
+        $client = $this->app->make(AeoClient::class);
+        for ($i = 1; $i <= 25; $i++) {
+            $client->forPath('/failed-'.$i);
+        }
+
+        $client->forPath('/delivery-1');
+        $client->forPath('/delivery-2');
+
+        $this->assertCount(2, $successfulPayloads);
+        $delivered = $successfulPayloads[0]['sdk_meta']['telemetry_events'] ?? [];
+        $this->assertCount(20, $delivered, 'outbox must retain only the newest 20 events');
+        $this->assertSame([], $successfulPayloads[1]['sdk_meta']['telemetry_events'] ?? []);
+
+        foreach ($delivered as $event) {
+            $this->assertMatchesRegularExpression('/^[a-f0-9]{32}$/', $event['event_id']);
+            $this->assertSame(1, $event['attempt_count']);
+            $this->assertSame(['timeout'], $event['attempt_outcomes']);
+            $this->assertSame([], $event['http_statuses']);
+            $this->assertSame(AeoResponse::STATUS_SERVER_ERROR, $event['final_status']);
+            $serialized = json_encode($event, JSON_THROW_ON_ERROR);
+            $this->assertStringNotContainsString('/failed-', $serialized);
+            $this->assertStringNotContainsString('pk_test_key', $serialized);
+        }
+    }
+
+    public function test_circuit_short_circuit_is_delivered_on_next_reachable_request(): void
+    {
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cache.circuit_breaker', true);
+        config()->set('smking.cold_start_retry', false);
+
+        $attempts = 0;
+        $deliveryPayload = null;
+        Http::fake([
+            'api.test/api/v1/public/aeo' => function ($request) use (&$attempts, &$deliveryPayload) {
+                $attempts++;
+                if ($attempts === 1) {
+                    return Http::response('upstream broken', 503);
+                }
+
+                $deliveryPayload = $request->data();
+
+                return Http::response(
+                    ['status' => 'not_found'],
+                    404,
+                    ['X-Smking-Request-Id' => $request->header('X-Smking-Request-Id')[0] ?? ''],
+                );
+            },
+        ]);
+
+        $client = $this->app->make(AeoClient::class);
+        $client->forPath('/opens-circuit');
+        $client->forPath('/short-circuited-private-path');
+
+        $store = $this->app->make(\Illuminate\Contracts\Cache\Repository::class);
+        $store->forget($client->cacheKeyPrefixes()['circuit_aeo']);
+        $client->forPath('/delivers-event');
+
+        $this->assertSame(2, $attempts, 'short-circuited call must not create an HTTP request');
+        $events = $deliveryPayload['sdk_meta']['telemetry_events'] ?? [];
+        $this->assertCount(1, $events);
+        $this->assertSame('short_circuited', $events[0]['circuit_action']);
+        $this->assertSame(0, $events[0]['attempt_count']);
+        $this->assertStringNotContainsString(
+            '/short-circuited-private-path',
+            json_encode($events[0], JSON_THROW_ON_ERROR),
+        );
+    }
+
     public function test_first_attempt_timeout_opens_circuit_even_when_retry_returns_not_found(): void
     {
         config()->set('smking.cache.enabled', true);

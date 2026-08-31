@@ -21,6 +21,10 @@ use Throwable;
  */
 class AeoClient
 {
+    private const TELEMETRY_OUTBOX_MAX_EVENTS = 20;
+
+    private const TELEMETRY_OUTBOX_TTL_SECONDS = 86400;
+
     public function __construct(
         private readonly HttpFactory $http,
         private readonly CacheFactory $cache,
@@ -272,6 +276,12 @@ class AeoClient
             return AeoResponse::notFound();
         }
 
+        $startedAt = microtime(true);
+        $requestId = $this->opaqueId();
+        $attemptOutcomes = [];
+        $httpStatuses = [];
+        $circuitAction = 'none';
+        $pendingTelemetry = $this->pendingTelemetryEvents();
         $payload = array_filter(
             array_merge(
                 [
@@ -280,7 +290,7 @@ class AeoClient
                     // so dashboard shows 'SDK active' without an outbound probe
                     // (which Cloudflare WAFs commonly block on Vercel ASN).
                     // Older saas silently ignores this optional field.
-                    'sdk_meta' => $this->selfReport(),
+                    'sdk_meta' => $this->selfReport($pendingTelemetry),
                 ],
                 $body,
             ),
@@ -290,7 +300,18 @@ class AeoClient
         // First attempt at the steady-state read timeout (default 1.5s). On a
         // warm Vercel function this returns immediately; the tight timeout
         // protects the FPM pool on high-traffic sites.
-        $response = $this->postDiscover($payload, $this->connectTimeout(), $this->readTimeout());
+        $attempt = $this->postDiscover(
+            $payload,
+            $this->connectTimeout(),
+            $this->readTimeout(),
+            $requestId,
+            1,
+        );
+        $response = $attempt['response'];
+        $attemptOutcomes[] = $attempt['outcome'];
+        if ($attempt['http_status'] !== null) {
+            $httpStatuses[] = $attempt['http_status'];
+        }
 
         // A transport failure means the upstream path is already unhealthy,
         // even when the optional cold-start retry later receives a valid 4xx.
@@ -299,6 +320,9 @@ class AeoClient
         $mayRetry = true;
         if ($response === null && $onTransportFailure !== null) {
             $mayRetry = (bool) $onTransportFailure();
+            if ($this->circuitProtectionEnabled()) {
+                $circuitAction = $mayRetry ? 'opened_retry_owner' : 'retry_denied';
+            }
         }
 
         // Cold-start retry (v0.19.0): low-traffic / newly-launched / off-peak
@@ -311,11 +335,29 @@ class AeoClient
         // dead upstream fails both attempts → serverError() → the existing
         // adaptive backoff + circuit breaker take over.
         if ($response === null && $mayRetry && $this->coldStartRetryEnabled()) {
-            $response = $this->postDiscover(
+            $attempt = $this->postDiscover(
                 $payload,
                 $this->coldStartConnectTimeout(),
                 $this->coldStartTimeout(),
+                $requestId,
+                2,
             );
+            $response = $attempt['response'];
+            $attemptOutcomes[] = $attempt['outcome'];
+            if ($attempt['http_status'] !== null) {
+                $httpStatuses[] = $attempt['http_status'];
+            }
+        }
+
+        // Receiving any HTTP response proves SaaS received the piggybacked
+        // metadata. Transport failures keep the outbox untouched because the
+        // request may never have left the customer network.
+        if (
+            $response !== null
+            && $response->header('X-Smking-Request-Id') === $requestId
+            && $pendingTelemetry !== []
+        ) {
+            $this->acknowledgeTelemetryEvents($pendingTelemetry);
         }
 
         if ($response === null) {
@@ -324,70 +366,103 @@ class AeoClient
             // cache TTL escalates (vs not_found 15min), saving a million-PV
             // site from hammering a dead upstream.
             $this->logger?->warning('smking: AEO discovery failed', [
-                'body' => $body,
+                'request_id' => $requestId,
                 'cold_start_retry' => $this->coldStartRetryEnabled(),
             ]);
-
-            return AeoResponse::serverError();
-        }
-
-        if ($response->status() === 202) {
-            return AeoResponse::pending();
-        }
-
-        if (! $response->successful()) {
+            $result = AeoResponse::serverError();
+        } elseif ($response->status() === 202) {
+            $result = AeoResponse::pending();
+        } elseif (! $response->successful()) {
             // 5xx → SaaS broken on its end → server_error (24hr cache).
             // 4xx → SaaS rejected the request (bad key / unknown path) →
             // not_found (15min cache, lets backend audit catch up).
             if ($response->status() >= 500) {
                 $this->logger?->warning('smking: AEO discovery upstream 5xx', [
+                    'request_id' => $requestId,
                     'status' => $response->status(),
-                    'body' => $body,
                 ]);
-
-                return AeoResponse::serverError();
+                $result = AeoResponse::serverError();
+            } else {
+                $result = AeoResponse::notFound();
             }
-
-            return AeoResponse::notFound();
+        } else {
+            $json = $response->json();
+            $result = is_array($json)
+                ? AeoResponse::fromArray($json)
+                : AeoResponse::notFound();
         }
 
-        $json = $response->json();
-        if (! is_array($json)) {
-            return AeoResponse::notFound();
+        $event = $this->discoveryEvent(
+            requestId: $requestId,
+            attemptOutcomes: $attemptOutcomes,
+            httpStatuses: $httpStatuses,
+            circuitAction: $circuitAction,
+            finalStatus: $result->status,
+            durationMs: (int) round((microtime(true) - $startedAt) * 1000),
+        );
+        $this->logger?->info('smking: AEO discovery', $event);
+
+        // Successful/4xx requests are already visible in the SaaS Runtime
+        // Log. Only outcomes that could not reliably reach SaaS need the
+        // bounded local outbox for delivery on a later request.
+        if ($result->status === AeoResponse::STATUS_SERVER_ERROR && $response === null) {
+            $this->appendTelemetryEvent($event);
         }
 
-        return AeoResponse::fromArray($json);
+        return $result;
     }
 
     /**
-     * Single upstream POST attempt. Returns the response, or null when the
-     * request threw (DNS / TCP / read timeout / connection error). The null
-     * sentinel lets {@see discover()} decide whether to cold-start retry
-     * before collapsing to serverError() — distinct from a transport success
-     * that happens to carry a 4xx/5xx status, which the caller inspects.
+     * Single upstream POST attempt. Returns the response plus a bounded,
+     * privacy-safe outcome category. A null response means DNS / TCP / read
+     * timeout / connection error and lets {@see discover()} decide whether to
+     * cold-start retry before collapsing to serverError().
      *
      * @param  array<string, mixed>  $payload
+     * @return array{response: ?\Illuminate\Http\Client\Response, outcome: string, http_status: ?int}
      */
-    private function postDiscover(array $payload, float $connectTimeout, float $readTimeout): ?\Illuminate\Http\Client\Response
+    private function postDiscover(
+        array $payload,
+        float $connectTimeout,
+        float $readTimeout,
+        string $requestId,
+        int $attempt,
+    ): array
     {
         try {
-            return $this->http
+            $response = $this->http
                 ->connectTimeout($this->httpTimeoutInt($connectTimeout))
                 ->timeout($this->httpTimeoutInt($readTimeout))
+                ->withHeaders([
+                    'X-Smking-Request-Id' => $requestId,
+                    'X-Smking-Attempt' => (string) $attempt,
+                ])
                 ->acceptJson()
                 ->asJson()
                 ->post($this->endpoint('/api/v1/public/aeo'), $payload);
+
+            return [
+                'response' => $response,
+                'outcome' => 'http_'.((int) floor($response->status() / 100)).'xx',
+                'http_status' => $response->status(),
+            ];
         } catch (Throwable $e) {
             // Debug (not warning): a first-attempt timeout that the cold-start
             // retry then recovers from is normal on cold-path sites — logging
             // it as a warning would cry wolf. discover() emits the single
             // warning only when *all* attempts fail.
             $this->logger?->debug('smking: AEO discovery attempt failed', [
-                'message' => $e->getMessage(),
+                'request_id' => $requestId,
+                'attempt' => $attempt,
+                'outcome' => $this->transportOutcome($e),
                 'read_timeout' => $readTimeout,
             ]);
 
-            return null;
+            return [
+                'response' => null,
+                'outcome' => $this->transportOutcome($e),
+                'http_status' => null,
+            ];
         }
     }
 
@@ -526,6 +601,8 @@ class AeoClient
         // upstream entirely. Markdown surface has its own independent
         // breaker so an agent-only outage never trips this one.
         if ($this->circuitOpen($repository, 'aeo')) {
+            $this->recordShortCircuit();
+
             return AeoResponse::serverError();
         }
 
@@ -1006,9 +1083,11 @@ class AeoClient
      * `InstalledVersions::isInstalled` check covers the rare case where
      * Composer's runtime API is unavailable (e.g. raw script include).
      */
-    private function selfReport(): array
+    private function selfReport(array $telemetryEvents = []): array
     {
-        return [
+        $cacheConfig = $this->config->get('smking.cache', []);
+        $configuredStore = $cacheConfig['store'] ?? $this->config->get('cache.default');
+        $report = [
             'sdk' => 'laravel',
             'sdk_version' => InstalledVersions::isInstalled('smking/laravel')
                 ? InstalledVersions::getVersion('smking/laravel')
@@ -1021,7 +1100,199 @@ class AeoClient
             'cms_base_path' => is_string($cb = $this->config->get('smking.cms.base_path'))
                 ? $cb
                 : null,
+            'cache_store' => is_string($configuredStore) && $configuredStore !== ''
+                ? $configuredStore
+                : null,
+            'cache_enabled' => (bool) ($cacheConfig['enabled'] ?? true),
+            'ready_ttl_seconds' => max(0, (int) ($cacheConfig['ttl'] ?? 3600)),
+            'not_found_ttl_seconds' => max(0, (int) ($cacheConfig['not_found_ttl'] ?? 60)),
+            'circuit_breaker_enabled' => (bool) ($cacheConfig['circuit_breaker'] ?? true),
+            'circuit_breaker_ttl_seconds' => max(0, (int) ($cacheConfig['circuit_breaker_ttl'] ?? 60)),
+            'cold_start_retry_enabled' => $this->coldStartRetryEnabled(),
+            'connect_timeout_ms' => max(0, (int) round($this->connectTimeout() * 1000)),
+            'read_timeout_ms' => max(0, (int) round($this->readTimeout() * 1000)),
         ];
+
+        if ($telemetryEvents !== []) {
+            $report['telemetry_events'] = $telemetryEvents;
+        }
+
+        return $report;
+    }
+
+    /**
+     * Build the privacy-safe event shared by the local structured logger and
+     * the delayed SaaS telemetry outbox. Deliberately excludes path, URL, API
+     * key, exception text, headers, and response bodies.
+     *
+     * @param  list<string>  $attemptOutcomes
+     * @param  list<int>  $httpStatuses
+     * @return array<string, mixed>
+     */
+    private function discoveryEvent(
+        string $requestId,
+        array $attemptOutcomes,
+        array $httpStatuses,
+        string $circuitAction,
+        string $finalStatus,
+        int $durationMs,
+    ): array {
+        return [
+            'event' => 'aeo_discovery',
+            'event_id' => $this->opaqueId(),
+            'request_id' => $requestId,
+            'occurred_at' => gmdate('Y-m-d\TH:i:s\Z'),
+            'attempt_count' => count($attemptOutcomes),
+            'attempt_outcomes' => array_values($attemptOutcomes),
+            'http_statuses' => array_values($httpStatuses),
+            'circuit_action' => $circuitAction,
+            'final_status' => $finalStatus,
+            'duration_ms' => min(120000, max(0, $durationMs)),
+        ];
+    }
+
+    private function recordShortCircuit(): void
+    {
+        $event = $this->discoveryEvent(
+            requestId: $this->opaqueId(),
+            attemptOutcomes: [],
+            httpStatuses: [],
+            circuitAction: 'short_circuited',
+            finalStatus: AeoResponse::STATUS_SERVER_ERROR,
+            durationMs: 0,
+        );
+        $this->logger?->info('smking: AEO discovery', $event);
+        $this->appendTelemetryEvent($event);
+    }
+
+    private function circuitProtectionEnabled(): bool
+    {
+        $cacheConfig = $this->config->get('smking.cache', []);
+
+        return (bool) ($cacheConfig['enabled'] ?? true)
+            && (bool) ($cacheConfig['circuit_breaker'] ?? true);
+    }
+
+    private function transportOutcome(Throwable $error): string
+    {
+        $message = strtolower($error->getMessage());
+
+        return str_contains($message, 'timeout')
+            || str_contains($message, 'timed out')
+            || str_contains($message, 'curl error 28')
+            ? 'timeout'
+            : 'transport_error';
+    }
+
+    private function opaqueId(): string
+    {
+        try {
+            return bin2hex(random_bytes(16));
+        } catch (Throwable) {
+            return substr(hash('sha256', uniqid('', true).microtime(true)), 0, 32);
+        }
+    }
+
+    /** @return list<array<string, mixed>> */
+    private function pendingTelemetryEvents(): array
+    {
+        try {
+            $events = $this->cacheStore()->get($this->telemetryOutboxKey(), []);
+            if (! is_array($events)) {
+                return [];
+            }
+
+            $valid = array_values(array_filter(
+                $events,
+                static fn ($event): bool => is_array($event)
+                    && isset($event['event_id'])
+                    && is_string($event['event_id'])
+                    && preg_match('/^[a-f0-9]{32}$/', $event['event_id']) === 1,
+            ));
+
+            return array_slice($valid, -self::TELEMETRY_OUTBOX_MAX_EVENTS);
+        } catch (Throwable) {
+            // Telemetry is best-effort and must never affect a page render.
+            return [];
+        }
+    }
+
+    /** @param array<string, mixed> $event */
+    private function appendTelemetryEvent(array $event): void
+    {
+        $this->mutateTelemetryOutbox(static function (array $events) use ($event): array {
+            $events[] = $event;
+
+            return array_slice($events, -self::TELEMETRY_OUTBOX_MAX_EVENTS);
+        });
+    }
+
+    /** @param list<array<string, mixed>> $sentEvents */
+    private function acknowledgeTelemetryEvents(array $sentEvents): void
+    {
+        $sentIds = array_fill_keys(array_values(array_filter(array_map(
+            static fn (array $event): ?string => isset($event['event_id']) && is_string($event['event_id'])
+                ? $event['event_id']
+                : null,
+            $sentEvents,
+        ))), true);
+
+        if ($sentIds === []) {
+            return;
+        }
+
+        $this->mutateTelemetryOutbox(static fn (array $events): array => array_values(array_filter(
+            $events,
+            static fn (array $event): bool => ! isset($sentIds[$event['event_id'] ?? '']),
+        )));
+    }
+
+    /**
+     * @param callable(list<array<string, mixed>>): list<array<string, mixed>> $mutator
+     */
+    private function mutateTelemetryOutbox(callable $mutator): void
+    {
+        try {
+            $repository = $this->cacheStore();
+            $key = $this->telemetryOutboxKey();
+            $write = function () use ($repository, $key, $mutator): void {
+                $current = $repository->get($key, []);
+                $events = is_array($current)
+                    ? array_values(array_filter($current, 'is_array'))
+                    : [];
+                $next = array_slice($mutator($events), -self::TELEMETRY_OUTBOX_MAX_EVENTS);
+
+                if ($next === []) {
+                    $repository->forget($key);
+                } else {
+                    $repository->put($key, $next, self::TELEMETRY_OUTBOX_TTL_SECONDS);
+                }
+            };
+
+            if (! $this->supportsLock($repository)) {
+                $write();
+
+                return;
+            }
+
+            $lock = $repository->lock($key.':lock', 5);
+            if (! $lock->get()) {
+                return;
+            }
+
+            try {
+                $write();
+            } finally {
+                $lock->release();
+            }
+        } catch (Throwable) {
+            // Best-effort only: cache/lock outages must not touch host pages.
+        }
+    }
+
+    private function telemetryOutboxKey(): string
+    {
+        return 'smking:telemetry:'.$this->cacheNamespace();
     }
 
     /**
