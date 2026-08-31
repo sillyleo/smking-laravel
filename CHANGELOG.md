@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.21.5 — Atomic cold-retry ownership (2026-08-31)
+
+**Concurrent transport failures now select exactly one cold-start retry
+owner.** v0.21.4 opened the circuit before retrying, but selected the retry
+owner with separate cache `has()` and `put()` operations. PHP-FPM workers
+whose timeouts completed together could all observe a missing breaker flag and
+all spend the retry budget.
+
+### Fixed
+- Claim the AEO circuit with the cache repository's atomic `add()` operation.
+- Preserve the existing sliding circuit TTL for later failures without giving
+  those requests retry ownership.
+- Add a deterministic public-seam regression that interleaves two
+  `AeoClient::forPath()` transport failures at the circuit-claim boundary and
+  verifies that only one request retries.
+
 ## v0.21.4 — AEO timeout amplification hardening (2026-08-31)
 
 **A single transport timeout now protects the whole AEO surface before the

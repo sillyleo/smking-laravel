@@ -643,10 +643,21 @@ class AeoClient
         }
 
         $key = $this->circuitKey($surface);
-        $alreadyOpen = $repository->has($key);
         $ttl = (int) ($cacheConfig['circuit_breaker_ttl'] ?? 60);
 
-        $repository->put($key, true, $ttl);
+        // Select the one cold-retry owner atomically. A separate has()+put()
+        // lets synchronized PHP-FPM workers all observe a missing key before
+        // any of them writes it, so every worker can incorrectly retry. The
+        // shared cache drivers implement add() as an atomic create-if-absent.
+        $opened = $repository->add($key, true, $ttl);
+
+        // Keep the existing sliding outage window: failures arriving while
+        // the breaker is open extend its TTL, but they do not gain retry
+        // ownership. ArrayStore's fallback is process-local, where there is
+        // no cross-process claim race to arbitrate.
+        if (! $opened) {
+            $repository->put($key, true, $ttl);
+        }
 
         // v0.7.1: refresh the tombstone on every trip (NOT gated on
         // alreadyOpen) so a long outage extending past the original
@@ -661,7 +672,7 @@ class AeoClient
         // not 1000 — operators page on the trip event, not the steady-state.
         // The breaker auto-resets when its TTL expires, so the next trip
         // after recovery gets its own log line.
-        if (! $alreadyOpen) {
+        if ($opened) {
             $this->logger?->warning("smking: circuit breaker tripped for {$surface} surface", [
                 'surface' => $surface,
                 'ttl_seconds' => $ttl,
@@ -672,7 +683,7 @@ class AeoClient
         // The first transport failure owns the single cold-start retry.
         // In-flight requests that fail after the breaker is already open
         // must stop immediately instead of each spending the long retry.
-        return ! $alreadyOpen;
+        return $opened;
     }
 
     /**
