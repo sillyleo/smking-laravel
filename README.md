@@ -316,6 +316,36 @@ The trip log is rate-limited to one line per outage window (a million-request bu
 
 Wire your usual log → metric path (Datadog Logs / Sentry / etc.) to alert on either string when you want a paging trigger instead of a polling status check.
 
+### Correlated AEO request logs (v0.21.6+)
+
+Each uncached AEO discovery emits one structured `smking: AEO discovery`
+record through Laravel's configured `LoggerInterface`. Its context contains:
+
+- `request_id`, reused by the first attempt and optional cold-start retry
+- `attempt_count`, `attempt_outcomes`, and exact `http_statuses`
+- `circuit_action` (`none`, `opened_retry_owner`, `retry_denied`, or
+  `short_circuited`)
+- `final_status` and `duration_ms`
+
+The same request ID is sent as `X-Smking-Request-Id`; each wire attempt carries
+`X-Smking-Attempt: 1|2`. SaaS echoes the request ID and writes its own
+`public_aeo_request` JSON event, so an operator can correlate the customer log
+with Vercel Runtime Logs.
+
+Calls that never receive an HTTP response, plus circuit-short-circuited calls,
+cannot report themselves immediately. The SDK therefore keeps a best-effort
+outbox in the configured Laravel cache (newest 20 events, 24-hour TTL) and
+piggybacks it on the next ordinary AEO POST. It only removes event IDs after an
+observability-aware SaaS response echoes the request ID. This creates no extra
+request and never delays the host response for telemetry delivery.
+
+Use a shared production cache such as Redis, Memcached, or database if these
+events and the circuit breaker must coordinate across PHP-FPM workers. The
+`array` store is process-local. No new `.env` key is required.
+
+Telemetry excludes API keys, raw paths/URLs, query strings, exception text,
+request/response bodies, and customer content.
+
 ## Upgrading
 
 This package is in `v0.x`. Per Composer's caret convention for pre-1.0 packages, **every minor bump (0.5 → 0.6, 0.6 → 0.7) is treated as breaking** — the constraint `"smking/laravel": "^0.6"` resolves to `>=0.6.0 <0.7.0` and `composer update` won't cross into 0.7.

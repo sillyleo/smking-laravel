@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.21.6 — Correlated AEO observability (2026-08-31)
+
+**AEO discovery can now be followed across Laravel retries and Vercel Runtime
+Logs without creating a second telemetry request.** Each logical discovery
+gets an opaque request ID; both HTTP attempts reuse it and identify their
+attempt number. The SDK emits one privacy-safe structured local event with
+attempt outcomes, HTTP statuses, circuit action, final status, and duration.
+
+### Added
+- Send `X-Smking-Request-Id` and `X-Smking-Attempt` on public AEO requests.
+- Piggyback non-sensitive cache/timeout/circuit settings in the existing
+  `sdk_meta` heartbeat payload.
+- Keep unreachable and circuit-short-circuited event summaries in a
+  best-effort, 20-event / 24-hour cache outbox. A later ordinary AEO request
+  carries them to SaaS; no background probe or extra request is created.
+- Acknowledge only event IDs whose request reached an observability-aware SaaS
+  handler and echoed the correlation ID.
+
+### Privacy and compatibility
+- Telemetry excludes API keys, raw paths, URLs, query strings, exception text,
+  request/response bodies, and customer content.
+- Older SaaS versions ignore the additive headers and `sdk_meta` fields. SDK
+  behavior remains fail-open when logging, cache, or outbox operations fail.
+
 ## v0.21.5 — Atomic cold-retry ownership (2026-08-31)
 
 **Concurrent transport failures now select exactly one cold-start retry
