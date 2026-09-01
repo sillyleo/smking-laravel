@@ -10,6 +10,7 @@ use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Psr\Log\LoggerInterface;
+use Smking\Laravel\Support\AeoCacheInvalidator;
 
 /**
  * Unified SmKing webhook receiver (v0.8.0+) — `/api/smking/webhook`
@@ -44,12 +45,10 @@ use Psr\Log\LoggerInterface;
  * (401 `duplicate_delivery`). Payloads from a SaaS predating
  * `deliveryId` skip dedup — the window remains the primary defense.
  *
- * AEO behaviour: Laravel SDK currently has no `smking:aeo:*` cache
- * key namespace (AEO Laravel uses TTL + circuit breaker, not push-
- * based invalidation). For `kind=aeo` payloads we acknowledge (200)
- * and log — operator may use `php artisan smking:cache:purge` for
- * explicit AEO eviction. Push-based AEO invalidation can land later
- * without touching this endpoint's contract.
+ * AEO behaviour: `kind=aeo` invalidates the same per-path AEO and Markdown
+ * cache entries as `smking:cache:purge`, including failure counters and
+ * circuit breakers. The next page request then re-fetches authoritative
+ * content from SaaS instead of serving an older ready response until TTL.
  */
 class WebhookController
 {
@@ -63,6 +62,7 @@ class WebhookController
     public function __construct(
         private readonly ConfigRepository $config,
         private readonly CacheFactory $cache,
+        private readonly AeoCacheInvalidator $aeoCacheInvalidator,
         private readonly ?LoggerInterface $logger = null,
     ) {
     }
@@ -151,14 +151,11 @@ class WebhookController
                 break;
 
             case 'aeo':
-                // AEO Laravel SDK uses TTL + circuit breaker; no push-
-                // invalidate cache namespace today. Ack + log for
-                // observability; operator can `smking:cache:purge` for
-                // explicit eviction.
-                $this->logger?->info(
-                    'smking: AEO webhook received (no Laravel push-invalidate cache today)',
-                    ['paths' => $paths],
-                );
+                $canonicalPaths = $this->aeoCacheInvalidator->purgePaths($paths);
+                $evicted = count($canonicalPaths);
+                $this->logger?->info('smking: AEO cache evicted via webhook', [
+                    'paths' => $canonicalPaths,
+                ]);
                 break;
 
             default:

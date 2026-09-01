@@ -5,8 +5,7 @@ declare(strict_types=1);
 namespace Smking\Laravel\Console;
 
 use Illuminate\Console\Command;
-use Smking\Laravel\AeoClient;
-use Smking\Laravel\Support\PathNormalizer;
+use Smking\Laravel\Support\AeoCacheInvalidator;
 
 /**
  * `php artisan smking:cache:purge <path>` — invalidate one cached AEO entry.
@@ -36,7 +35,7 @@ class CachePurgeCommand extends Command
 
     protected $description = 'Forget cached AEO + markdown responses for a specific path or product ID';
 
-    public function handle(AeoClient $client): int
+    public function handle(AeoCacheInvalidator $invalidator): int
     {
         $rawPath = (string) $this->argument('path');
         $productId = $this->option('product-id');
@@ -48,7 +47,7 @@ class CachePurgeCommand extends Command
         }
 
         if ($productId !== null) {
-            return $this->purgeByProductId($client, (int) $productId);
+            return $this->purgeByProductId($invalidator, (int) $productId);
         }
 
         if ($rawPath === '') {
@@ -57,56 +56,26 @@ class CachePurgeCommand extends Command
             return self::INVALID;
         }
 
-        return $this->purgeByPath($client, $rawPath);
+        return $this->purgeByPath($invalidator, $rawPath);
     }
 
-    private function purgeByPath(AeoClient $client, string $rawPath): int
+    private function purgeByPath(AeoCacheInvalidator $invalidator, string $rawPath): int
     {
-        // Canonicalize identically to InjectAeo middleware — without this,
-        // `smking:cache:purge /x/` would build the cache key for `/x/`,
-        // but the middleware writes under `/x`, so purge says "success"
-        // while the real entry survives the full server_error TTL.
-        $path = PathNormalizer::canonical($rawPath);
-
-        $store = $client->cacheStore();
-        $prefixes = $client->cacheKeyPrefixes();
-
-        $aeoKey = $prefixes['aeo'].http_build_query(['path' => $path]);
-        $mdKey = $prefixes['markdown'].http_build_query(['path' => $path]);
-
-        $store->forget($aeoKey);
-        $store->forget($mdKey);
-
-        // v0.10.0: clear the adaptive-backoff failure counters too. Without
-        // this, purge would reset the cache value but leave the counter at
-        // (say) 3, so the next upstream failure would jump straight to the
-        // 30-minute backoff step instead of restarting at 30s.
-        $store->forget($aeoKey.':fc');
-        $store->forget($mdKey.':fc');
-
-        // v0.7.0 round-4: also clear the per-surface circuit breakers.
-        // purge is a manual recovery action — operator is explicitly
-        // saying "retry now". Without this, "next request re-fetches"
-        // (advertised in the docstring above) is false during the
-        // breaker TTL window and the operator just has to wait.
-        // Both surfaces are touched: a purged path can be hit by either
-        // forPath() or getMarkdown(), so clearing both gives deterministic
-        // recovery regardless of which surface the next request lands on.
-        $store->forget($prefixes['circuit_aeo']);
-        $store->forget($prefixes['circuit_md']);
+        $result = $invalidator->purgePath($rawPath);
+        $path = $result['path'];
 
         if ($rawPath !== $path) {
             $this->line("Input path canonicalized: {$rawPath} → {$path}");
         }
         $this->info("Purged smking cache for path: {$path}");
-        $this->line("  aeo     → {$aeoKey}");
-        $this->line("  md      → {$mdKey}");
+        $this->line("  aeo     → {$result['aeo_key']}");
+        $this->line("  md      → {$result['markdown_key']}");
         $this->line('  circuit → cleared (aeo + md surfaces)');
 
         return self::SUCCESS;
     }
 
-    private function purgeByProductId(AeoClient $client, int $productId): int
+    private function purgeByProductId(AeoCacheInvalidator $invalidator, int $productId): int
     {
         if ($productId <= 0) {
             $this->error('--product-id must be a positive integer.');
@@ -114,29 +83,10 @@ class CachePurgeCommand extends Command
             return self::INVALID;
         }
 
-        $store = $client->cacheStore();
-        $prefixes = $client->cacheKeyPrefixes();
-
-        // forProductId() and the markdown path-API endpoint have different
-        // backends; markdown rendering uses path keys, AEO uses product_id.
-        // Purge the AEO surface only — markdown for product_id flows
-        // through the path surface and would already be covered by a
-        // separate path-based purge.
-        $aeoKey = $prefixes['aeo'].http_build_query(['product_id' => $productId]);
-        $store->forget($aeoKey);
-
-        // v0.10.0: clear the adaptive-backoff failure counter too.
-        $store->forget($aeoKey.':fc');
-
-        // v0.7.0 round-4: clear the AEO surface breaker so the next call
-        // for this product (or any path) actually retries instead of
-        // serving short-circuit server_error responses for the remaining
-        // breaker TTL. Markdown breaker is left alone — product_id never
-        // touches markdown surface.
-        $store->forget($prefixes['circuit_aeo']);
+        $result = $invalidator->purgeProductId($productId);
 
         $this->info("Purged smking cache for product_id: {$productId}");
-        $this->line("  aeo     → {$aeoKey}");
+        $this->line("  aeo     → {$result['aeo_key']}");
         $this->line('  circuit → cleared (aeo surface)');
 
         return self::SUCCESS;
