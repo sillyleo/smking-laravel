@@ -117,7 +117,7 @@ The same `<x-smking-cms :slug="$slug" />` Blade view works for both flat and nes
 
 ### Cache invalidation
 
-CMS responses cache server-side for 5 minutes. When you publish, rename, or archive a page in the dashboard, smking SaaS POSTs a signed webhook to `https://<your-site>/api/smking/webhook` (auto-mounted by the SDK in v0.11+). The handler verifies HMAC against `SMKING_WEBHOOK_SECRET` and evicts the matching cache so visitors see the new content on the next request.
+Ready AEO and CMS responses cache server-side for one hour by default. When generated AEO changes, or when you publish, rename, or archive a CMS page, smking SaaS POSTs a signed webhook to `https://<your-site>/api/smking/webhook` (auto-mounted by the SDK in v0.11+). The handler verifies HMAC against `SMKING_WEBHOOK_SECRET` and evicts the matching AEO, Markdown, or CMS cache entries so visitors see the new content on the next request.
 
 If `SMKING_WEBHOOK_SECRET` is unset, the webhook route returns 503 and cache invalidation falls back to TTL-based expiry.
 

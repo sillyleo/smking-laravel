@@ -1318,10 +1318,10 @@ class AeoClient
     /**
      * 12-char hash of (api_key, base_url). Stable across requests for the
      * same env, changes when either rotates so old cache entries auto-evict.
-     * Public so {@see Console\CachePurgeCommand} can reconstruct the key
+     * Public so {@see Support\AeoCacheInvalidator} can reconstruct the key
      * prefixes without reaching into private state.
      *
-     * @internal exposed for the cache-purge command; not part of public API.
+     * @internal exposed for the shared cache invalidator; not part of public API.
      */
     public function cacheNamespace(): string
     {
@@ -1334,8 +1334,8 @@ class AeoClient
 
     /**
      * Cache key prefixes / breaker keys used by this client. Used by the
-     * cache-purge command to flush per-path entries AND the surface-scoped
-     * circuit breakers in one shot.
+     * shared cache invalidator to flush per-path entries AND the
+     * surface-scoped circuit breakers in one shot.
      *
      *   aeo        — `smking:aeo:{ns}:`           (forPath / forProductId)
      *   markdown   — `smking:md:{ns}:`            (getMarkdown)

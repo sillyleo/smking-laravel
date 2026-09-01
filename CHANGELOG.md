@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.21.7 — AEO webhook cache invalidation (2026-09-01)
+
+**Generated AEO changes now become visible on the next page request instead
+of waiting for the ready-cache TTL.** The signed publish webhook invalidates
+the affected path's AEO and Markdown entries, failure counters, and surface
+circuit breakers through the same service used by `smking:cache:purge`.
+
+### Fixed
+- Handle `kind=aeo` webhook payloads by invalidating every unique canonical
+  path instead of acknowledging without action.
+- Share cache-key construction and recovery cleanup between the webhook and
+  operator CLI so the two invalidation paths cannot drift.
+- Keep TTL as the fallback when the webhook is disabled, unreachable, or
+  rejected; successful webhook delivery no longer trades freshness for the
+  one-hour ready-cache default.
+
 ## v0.21.6 — Correlated AEO observability (2026-08-31)
 
 **AEO discovery can now be followed across Laravel retries and Vercel Runtime

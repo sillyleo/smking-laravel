@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace Smking\Laravel\Tests;
 
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
+use Smking\Laravel\AeoClient;
+use Smking\Laravel\Data\AeoResponse;
 
 class WebhookControllerTest extends TestCase
 {
@@ -89,17 +92,55 @@ class WebhookControllerTest extends TestCase
         $response->assertJsonPath('evicted', 0);
     }
 
-    public function test_aeo_payload_ack_without_eviction(): void
+    public function test_aeo_payload_evicts_aeo_and_markdown_cache(): void
     {
+        /** @var AeoClient $client */
+        $client = $this->app->make(AeoClient::class);
+        $store = $client->cacheStore();
+        $prefixes = $client->cacheKeyPrefixes();
+        $path = '/products/foo';
+        $aeoKey = $prefixes['aeo'].http_build_query(['path' => $path]);
+        $markdownKey = $prefixes['markdown'].http_build_query(['path' => $path]);
+        $rootKey = $prefixes['aeo'].http_build_query(['path' => '/']);
+
+        $store->put($aeoKey, new AeoResponse(
+            status: AeoResponse::STATUS_READY,
+            jsonLd: ['@type' => 'WebPage'],
+        ), 300);
+        $store->put($markdownKey, 'stale_markdown', 300);
+        $store->put($aeoKey.':fc', 3, 300);
+        $store->put($markdownKey.':fc', 3, 300);
+        $store->put($prefixes['circuit_aeo'], true, 300);
+        $store->put($prefixes['circuit_md'], true, 300);
+        $store->put($rootKey, 'untouched_root', 300);
+
         $response = $this->signedPost('test_secret_abc', $this->freshPayload([
             'kind' => 'aeo',
-            'paths' => ['/products/foo', '/products/bar'],
+            'paths' => [$path.'/', $path, '   '],
         ]));
 
         $response->assertStatus(200);
         $response->assertJsonPath('kind', 'aeo');
-        // AEO Laravel SDK has no push-invalidate cache namespace today.
-        $response->assertJsonPath('evicted', 0);
+        $response->assertJsonPath('evicted', 1);
+        $this->assertFalse($store->has($aeoKey));
+        $this->assertFalse($store->has($markdownKey));
+        $this->assertFalse($store->has($aeoKey.':fc'));
+        $this->assertFalse($store->has($markdownKey.':fc'));
+        $this->assertFalse($store->has($prefixes['circuit_aeo']));
+        $this->assertFalse($store->has($prefixes['circuit_md']));
+        $this->assertSame('untouched_root', $store->get($rootKey));
+
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response([
+                'status' => 'ready',
+                'jsonLd' => ['@type' => 'Product'],
+            ], 200),
+        ]);
+
+        $fresh = $client->forPath($path, 'https://shop.test/products/foo');
+
+        $this->assertSame('Product', $fresh->jsonLd['@type'] ?? null);
+        Http::assertSentCount(1);
     }
 
     public function test_cms_page_payload_evicts_cms_cache(): void
