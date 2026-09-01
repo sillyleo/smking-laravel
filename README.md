@@ -84,36 +84,20 @@ Without `<x-smking-runtime />`, `<x-smking-cms>` content still renders but the T
 
 The base install above only wires AEO. If you author content in the smking dashboard's CMS and want to render it on your Laravel site, use the `<x-smking-cms slug="…" />` Blade component.
 
-The SDK **does not have a "CMS root" config** — you choose any URL prefix (`/blog`, `/knowledge`, `/shop/articles`) and wire your own route. The component takes a `slug` prop, fetches the published page from `${SMKING_BASE_URL}/api/v1/public/page?slug=…`, and renders the Tiptap ProseMirror JSON as `<article class="smk-cms">…</article>` server-side via `ueberdosis/tiptap-php`.
-
-### Flat slug
+The SDK **does not have a "CMS root" config** — you choose any URL prefix (`/blog`, `/knowledge`, `/shop/articles`) and mount the response-aware CMS controller. It returns `404` for an explicit `not_found`, `503` for a pending or unavailable CMS response, and renders ready or preview content with `200`.
 
 ```php
 // routes/web.php
-Route::get('/blog/{slug}', function (string $slug) {
-    return view('blog-page', ['slug' => $slug]);
-});
+Route::get('/blog/{path?}', [\Smking\Laravel\Http\Controllers\CmsPageController::class, '__invoke'])
+    ->where('path', '.*');
 ```
 
 ```blade
-{{-- resources/views/blog-page.blade.php --}}
-<x-smking-cms :slug="$slug" />
+{{-- resources/views/smking-cms-page.blade.php --}}
+<x-smking-cms :slug="$slug" :page="$cms" />
 ```
 
-This handles `/blog/hello` but **not** `/blog/seo/intro` — Laravel's default route param rejects `/`.
-
-### Nested slugs (`/blog/123`, `/blog/seo/intro`)
-
-smking CMS slugs can be nested. Use a catch-all parameter with the `.*` regex constraint:
-
-```php
-// routes/web.php
-Route::get('/blog/{path}', function (string $path) {
-    return view('blog-page', ['slug' => $path]);
-})->where('path', '.*');  // ← required; without this Laravel rejects nested paths
-```
-
-The same `<x-smking-cms :slug="$slug" />` Blade view works for both flat and nested. Slug is purely what your route resolver passes in — single-segment (`hello`) or multi-segment (`blog/seo/intro`) both match dashboard slug format.
+The optional catch-all handles the mount root, flat slugs, and nested slugs. Passing the controller's preloaded `$cms` object to `<x-smking-cms>` avoids a second public CMS request.
 
 ### Cache invalidation
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.21.8 — Response-aware CMS routes (2026-09-01)
+
+### Added
+- `CmsPageController` provides the canonical response-aware Blog route:
+  renderable CMS pages return 200, explicit misses return 404, and pending or
+  unavailable responses return 503.
+- `<x-smking-cms>` accepts an optional preloaded `CmsPage`, allowing the
+  controller and Blade view to share one CMS fetch.
+
 ## v0.21.7 — AEO webhook cache invalidation (2026-09-01)
 
 **Generated AEO changes now become visible on the next page request instead

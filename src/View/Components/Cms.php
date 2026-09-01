@@ -26,8 +26,9 @@ class Cms extends Component
     public function __construct(
         CmsClient $client,
         string $slug,
+        ?CmsPage $page = null,
     ) {
-        $this->cms = $client->forSlug($slug);
+        $this->cms = $page ?? $client->forSlug($slug);
     }
 
     public function render(): View
