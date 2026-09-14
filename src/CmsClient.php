@@ -11,6 +11,7 @@ use Illuminate\Http\Client\Factory as HttpFactory;
 use Psr\Log\LoggerInterface;
 use Smking\Laravel\Data\CmsPage;
 use Smking\Laravel\Delivery\DeliveryResult;
+use Smking\Laravel\Delivery\LegacyCmsCache;
 use Smking\Laravel\Delivery\OnDemandDelivery;
 use Smking\Laravel\Delivery\WaitBudget;
 use Smking\Laravel\Tiptap\EditorFactory;
@@ -40,6 +41,7 @@ class CmsClient
         private readonly ?LoggerInterface $logger = null,
         private readonly ?OnDemandDelivery $delivery = null,
         private readonly ?Closure $deliveryBudget = null,
+        private readonly ?LegacyCmsCache $legacyCache = null,
     ) {
     }
 
@@ -59,11 +61,19 @@ class CmsClient
             return CmsPage::serverError();
         }
 
+        $published = $this->targetedPage($slug);
+        if ($published !== null) {
+            return $published;
+        }
+
         if ($this->usesOnDemandDelivery()) {
             return $this->onDemandPage($slug);
         }
 
-        return $this->remember($slug, fn (): CmsPage => $this->fetch($slug));
+        $page = $this->legacyCache?->remember($slug, fn (): CmsPage => $this->fetch($slug))
+            ?? $this->remember($slug, fn (): CmsPage => $this->fetch($slug));
+
+        return $this->targetedPage($slug) ?? $page;
     }
 
     /**
@@ -224,6 +234,31 @@ class CmsClient
             || in_array($result?->error, ['access_denied', 'configuration', 'disabled', 'invalid_identifier'], true)
                 ? CmsPage::notFound()
                 : CmsPage::serverError();
+    }
+
+    private function targetedPage(string $slug): ?CmsPage
+    {
+        if ($this->delivery === null) {
+            return null;
+        }
+        try {
+            $result = $this->delivery->publication('cms-page', 'slug:'.$slug);
+        } catch (Throwable) {
+            return CmsPage::serverError();
+        }
+        if ($result === null) {
+            return null;
+        }
+        if ($result->snapshot !== null) {
+            return $this->pageFromPayload($result->snapshot->payload);
+        }
+        if ($result->error === 'target_pending' && $this->deliveryMode() === 'legacy') {
+            return $this->legacyCache?->peek($slug) ?? CmsPage::serverError();
+        }
+
+        return $result->httpStatus === 404
+            ? CmsPage::notFound()
+            : CmsPage::serverError();
     }
 
     private function onDemandRead(string $resource, string $identifier): ?DeliveryResult

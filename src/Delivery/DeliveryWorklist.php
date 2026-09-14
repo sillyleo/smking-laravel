@@ -140,7 +140,7 @@ final class DeliveryWorklist
                 $summary['claimed']++;
                 $result = $delivery->refresh($item['resource'], $item['identifier'], $budget);
                 $complete = $result->snapshot !== null
-                    || in_array($result->error, ['access_denied', 'disabled', 'invalid_identifier'], true);
+                    || in_array($result->error, ['access_denied', 'disabled', 'invalid_identifier', 'withdrawn'], true);
                 if (! $this->finish($item, $complete ? null : ($result->error ?? 'unknown'))) {
                     throw new RuntimeException('delivery_work_ack_failed');
                 }

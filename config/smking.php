@@ -50,6 +50,10 @@ return [
         'work_max_jobs' => env('SMKING_DELIVERY_WORK_MAX_JOBS', 10),
         'work_budget_ms' => env('SMKING_DELIVERY_WORK_BUDGET_MS', 5000),
         'heartbeat_seconds' => env('SMKING_DELIVERY_HEARTBEAT_SECONDS', 180),
+        // Versioned CMS targets stay off until SaaS delivery and the exact
+        // deployment scope have both been prepared. Keep enabled on rollback.
+        'notifications_enabled' => env('SMKING_DELIVERY_NOTIFICATIONS_ENABLED', false),
+        'notifications_scope' => env('SMKING_DELIVERY_NOTIFICATIONS_SCOPE'),
     ],
 
     /*

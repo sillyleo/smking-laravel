@@ -7,10 +7,7 @@ namespace Smking\Laravel\Delivery;
 use Closure;
 use DateTimeImmutable;
 use DateTimeZone;
-use Illuminate\Cache\FileStore;
-use Illuminate\Cache\RedisStore;
 use Illuminate\Contracts\Cache\Repository as CacheRepository;
-use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Http\Client\Response;
@@ -33,6 +30,8 @@ final class OnDemandDelivery
 
     private readonly Closure $clock;
 
+    private readonly DeliveryCapacity $capacity;
+
     public function __construct(
         private readonly CacheRepository $cache,
         private readonly HttpFactory $http,
@@ -41,11 +40,52 @@ final class OnDemandDelivery
         private readonly int $cacheFormat = DeliverySnapshot::CACHE_FORMAT,
         private readonly ?DeliveryWorklist $worklist = null,
         private readonly ?DeliveryReportOutbox $reports = null,
+        private readonly ?DeliveryTargetState $targets = null,
+        ?DeliveryCapacity $capacity = null,
     ) {
         $this->clock = $clock ?? static fn (): int => (int) floor(microtime(true) * 1000);
+        $this->capacity = $capacity ?? new DeliveryCapacity($cache, $config);
     }
 
     public function read(string $resource, string $identifier, WaitBudget $budget): DeliveryResult
+    {
+        $cached = $this->peek($resource, $identifier);
+        if ($cached->snapshot !== null) {
+            $this->scheduleBackground($resource, $identifier, $cached);
+
+            return $cached;
+        }
+        if (in_array($cached->error, [
+            'access_denied',
+            'configuration',
+            'disabled',
+            'invalid_identifier',
+            'target_pending',
+            'withdrawn',
+        ], true)) {
+            $this->scheduleBackground($resource, $identifier, $cached);
+
+            return $cached;
+        }
+        if ($cached->error === 'cache_unavailable') {
+            $this->reports?->recordFailure('cache_unavailable');
+
+            return $cached;
+        }
+        if (in_array($resource, ['aeo', 'markdown'], true)) {
+            $this->scheduleBackground($resource, $identifier, $cached);
+
+            return $cached;
+        }
+
+        $result = $this->refresh($resource, $identifier, $budget);
+        $this->scheduleBackground($resource, $identifier, $result);
+
+        return $result;
+    }
+
+    /** Local-only read used by preflight and guarded legacy rollback. */
+    public function peek(string $resource, string $identifier): DeliveryResult
     {
         if (! $this->configured()) {
             return new DeliveryResult(error: 'configuration');
@@ -62,29 +102,23 @@ final class OnDemandDelivery
             if ($authority !== null) {
                 return $authority;
             }
+            $target = $this->targetResult($this->targetRecord($resource, $identifier), $resource, $identifier);
 
-            $cached = $this->cached($resource, $identifier);
-            if ($cached->snapshot !== null) {
-                $this->scheduleBackground($resource, $identifier, $cached);
-
-                return $cached;
-            }
-
-            if (in_array($resource, ['aeo', 'markdown'], true)) {
-                $result = new DeliveryResult(error: 'cache_miss', refreshRequired: true);
-                $this->scheduleBackground($resource, $identifier, $result);
-
-                return $result;
-            }
-
-            $result = $this->refresh($resource, $identifier, $budget);
-            $this->scheduleBackground($resource, $identifier, $result);
-
-            return $result;
+            return $target ?? $this->cached($resource, $identifier);
         } catch (Throwable) {
-            $this->reports?->recordFailure('cache_unavailable');
-
             return new DeliveryResult(error: 'cache_unavailable');
+        }
+    }
+
+    public function hasState(string $resource, string $identifier): bool
+    {
+        if (DeliveryIdentifier::parameters($resource, $identifier) === null) {
+            return false;
+        }
+        try {
+            return $this->state($resource, $identifier) !== null;
+        } catch (Throwable) {
+            return false;
         }
     }
 
@@ -107,7 +141,7 @@ final class OnDemandDelivery
         if (! $this->resourceEnabled($resource)) {
             return new DeliveryResult(error: 'disabled');
         }
-        if (! $this->supportsCrossProcessLocks()) {
+        if (! $this->capacity->available()) {
             return new DeliveryResult(error: 'capacity');
         }
 
@@ -116,6 +150,11 @@ final class OnDemandDelivery
             if ($authority !== null) {
                 return $authority;
             }
+            $target = $this->targetRecord($resource, $identifier);
+            if (($target['target']['action'] ?? null) === 'withdraw') {
+                return new DeliveryResult(httpStatus: 404, error: 'withdrawn');
+            }
+            $targetToken = $target['token'] ?? null;
 
             $control = $this->control($resource);
             $now = ($this->clock)();
@@ -123,21 +162,25 @@ final class OnDemandDelivery
                 return new DeliveryResult(error: 'backoff');
             }
 
-            $result = $this->withCapacity($resource, $identifier, function () use ($resource, $identifier, $budget): DeliveryResult {
+            $result = $this->capacity->run($resource, $identifier, function () use ($resource, $identifier, $budget, $target, $targetToken): DeliveryResult {
                 $cached = $this->cached($resource, $identifier);
-                if ($cached->snapshot?->isFresh(($this->clock)())) {
+                if ($cached->snapshot?->isFresh(($this->clock)())
+                    && $this->matchesTarget($cached->snapshot, $target)
+                ) {
                     return $cached;
                 }
 
                 $generation = bin2hex(random_bytes(16));
-                $prepared = $this->withLock($this->stateKey($resource, $identifier), function () use ($resource, $identifier, $generation): bool {
-                    $state = $this->state($resource, $identifier) ?? $this->emptyState($resource, $identifier);
-                    $state['generation'] = $generation;
+                $prepared = $this->guardTarget($resource, $identifier, $targetToken, function () use ($resource, $identifier, $generation): mixed {
+                    return $this->withLock($this->stateKey($resource, $identifier), function () use ($resource, $identifier, $generation): bool {
+                        $state = $this->state($resource, $identifier) ?? $this->emptyState($resource, $identifier);
+                        $state['generation'] = $generation;
 
-                    return $this->put($this->stateKey($resource, $identifier), $state);
+                        return $this->put($this->stateKey($resource, $identifier), $state);
+                    });
                 });
                 if ($prepared !== true) {
-                    return new DeliveryResult(error: 'cache_busy');
+                    return new DeliveryResult(error: $prepared === false ? 'superseded' : 'cache_busy');
                 }
 
                 $fetched = $budget->run(fn (float $seconds): DeliveryResult => $this->request($resource, $identifier, $seconds));
@@ -149,8 +192,14 @@ final class OnDemandDelivery
 
                     return $fetched;
                 }
+                if (! $this->matchesTarget($fetched->snapshot, $target)) {
+                    $mismatch = new DeliveryResult(httpStatus: $fetched->httpStatus, error: 'target_mismatch');
+                    $this->recordControlFailure($resource, $mismatch);
 
-                return $this->commit($resource, $identifier, $generation, $fetched);
+                    return $mismatch;
+                }
+
+                return $this->commit($resource, $identifier, $generation, $targetToken, $fetched);
             });
 
             return $result instanceof DeliveryResult
@@ -166,7 +215,7 @@ final class OnDemandDelivery
     {
         if (! $this->configured()
             || DeliveryIdentifier::parameters($resource, $identifier) === null
-            || ! $this->supportsCrossProcessLocks()
+            || ! $this->capacity->available()
         ) {
             return false;
         }
@@ -208,48 +257,131 @@ final class OnDemandDelivery
         return new DeliveryResult(error: 'cache_miss');
     }
 
+    /** @return array{format:int,token:string,target:array<string,mixed>,updated_at:int}|null */
+    private function targetRecord(string $resource, string $identifier): ?array
+    {
+        if ($resource !== 'cms-page' || $this->targets === null || ! $this->targets->enabled()) {
+            return null;
+        }
+
+        return $this->targets->read($identifier);
+    }
+
+    public function publication(string $resource, string $identifier): ?DeliveryResult
+    {
+        if ($resource !== 'cms-page' || $this->targets === null || ! $this->targets->enabled()) {
+            return null;
+        }
+        try {
+            $record = $this->targetRecord($resource, $identifier);
+            if (($record['target']['action'] ?? null) === 'withdraw') {
+                return new DeliveryResult(httpStatus: 404, error: 'withdrawn');
+            }
+            $authority = $this->authority($resource);
+            if ($authority !== null) {
+                return $authority;
+            }
+
+            return $this->targetResult($record, $resource, $identifier);
+        } catch (Throwable) {
+            return new DeliveryResult(error: 'cache_unavailable');
+        }
+    }
+
+    /** @param array{target:array<string,mixed>}|null $record */
+    private function targetResult(?array $record, string $resource, string $identifier): ?DeliveryResult
+    {
+        if ($record === null) {
+            return null;
+        }
+        if ($record['target']['action'] === 'withdraw') {
+            return new DeliveryResult(httpStatus: 404, error: 'withdrawn');
+        }
+        $cached = $this->cached($resource, $identifier);
+        if ($cached->snapshot !== null) {
+            if ($this->matchesTarget($cached->snapshot, $record)) {
+                return $cached;
+            }
+
+            return new DeliveryResult(
+                snapshot: $cached->snapshot,
+                httpStatus: $cached->httpStatus,
+                error: 'target_pending',
+                refreshRequired: true,
+            );
+        }
+
+        return new DeliveryResult(error: 'target_pending', refreshRequired: true);
+    }
+
+    /** @param array{target:array<string,mixed>}|null $target */
+    private function matchesTarget(DeliverySnapshot $snapshot, ?array $target): bool
+    {
+        return $target === null
+            || ($target['target']['action'] === 'update'
+                && ($snapshot->payload['delivery']['content_version'] ?? null) === $target['target']['contentVersion']);
+    }
+
+    private function guardTarget(
+        string $resource,
+        string $identifier,
+        ?string $targetToken,
+        callable $operation,
+    ): mixed {
+        if ($resource !== 'cms-page' || $this->targets === null || ! $this->targets->enabled()) {
+            return $operation();
+        }
+
+        return $this->targets->guard($identifier, $targetToken, $operation);
+    }
+
     private function commit(
         string $resource,
         string $identifier,
         string $generation,
+        ?string $targetToken,
         DeliveryResult $result,
     ): DeliveryResult {
-        $committed = $this->withLock($this->stateKey($resource, $identifier), function () use ($resource, $identifier, $generation, $result): string {
-            $state = $this->state($resource, $identifier);
-            if ($state === null || $state['generation'] !== $generation) {
-                return 'superseded';
-            }
-            if (! $result->snapshot->isUsable(($this->clock)())) {
-                return 'expired';
-            }
-
-            foreach (['success', 'missing'] as $field) {
-                $existing = DeliverySnapshot::fromCache(
-                    $resource,
-                    $identifier,
-                    $state[$field] ?? null,
-                    ($this->clock)(),
-                    $this->cacheFormat,
-                );
-                if ($existing !== null && $existing->validatedAtMs > $result->snapshot->validatedAtMs) {
-                    return 'out_of_order';
+        $committed = $this->guardTarget($resource, $identifier, $targetToken, function () use ($resource, $identifier, $generation, $result): mixed {
+            return $this->withLock($this->stateKey($resource, $identifier), function () use ($resource, $identifier, $generation, $result): string {
+                $state = $this->state($resource, $identifier);
+                if ($state === null || $state['generation'] !== $generation) {
+                    return 'superseded';
                 }
-            }
+                if (! $result->snapshot->isUsable(($this->clock)())) {
+                    return 'expired';
+                }
 
-            $missing = $result->httpStatus === 404;
-            $state['success'] = $missing ? null : $result->snapshot->toCache($this->cacheFormat);
-            $state['missing'] = $missing ? $result->snapshot->toCache($this->cacheFormat) : null;
-            if (! $this->put($this->stateKey($resource, $identifier), $state)) {
-                return 'cache_unavailable';
-            }
-            $this->writeControl($resource, denied: false, status: null, circuitUntil: 0);
+                foreach (['success', 'missing'] as $field) {
+                    $existing = DeliverySnapshot::fromCache(
+                        $resource,
+                        $identifier,
+                        $state[$field] ?? null,
+                        ($this->clock)(),
+                        $this->cacheFormat,
+                    );
+                    if ($existing !== null && $existing->validatedAtMs > $result->snapshot->validatedAtMs) {
+                        return 'out_of_order';
+                    }
+                }
 
-            return 'committed';
+                $missing = $result->httpStatus === 404;
+                $state['success'] = $missing ? null : $result->snapshot->toCache($this->cacheFormat);
+                $state['missing'] = $missing ? $result->snapshot->toCache($this->cacheFormat) : null;
+                if (! $this->put($this->stateKey($resource, $identifier), $state)) {
+                    return 'cache_unavailable';
+                }
+                $this->writeControl($resource, denied: false, status: null, circuitUntil: 0);
+
+                return 'committed';
+            });
         });
 
         return $committed === 'committed'
             ? $result
-            : new DeliveryResult(error: is_string($committed) ? $committed : 'cache_busy');
+            : new DeliveryResult(error: $committed === false
+                ? 'superseded'
+                : (is_string($committed) ? $committed : 'cache_busy'));
     }
 
     private function request(string $resource, string $identifier, float $remainingSeconds): DeliveryResult
@@ -407,12 +539,20 @@ final class OnDemandDelivery
 
     private function writeControl(string $resource, bool $denied, ?int $status, int $circuitUntil): void
     {
-        if (! $this->put($this->controlKey($resource), [
-            'format' => 1,
-            'denied' => $denied,
-            'status' => $status,
-            'circuit_until' => $circuitUntil,
-        ])) {
+        $written = $this->withLock($this->controlKey($resource), function () use ($resource, $denied, $status, $circuitUntil): bool {
+            $current = $this->control($resource);
+            if (! $denied && ($current['denied'] ?? false) === true) {
+                return true;
+            }
+
+            return $this->put($this->controlKey($resource), [
+                'format' => 1,
+                'denied' => $denied,
+                'status' => $status,
+                'circuit_until' => $circuitUntil,
+            ]);
+        });
+        if ($written !== true) {
             throw new RuntimeException('delivery_control_write_failed');
         }
     }
@@ -455,34 +595,6 @@ final class OnDemandDelivery
         ];
     }
 
-    private function withCapacity(string $resource, string $identifier, callable $operation): mixed
-    {
-        $slots = $this->boundedInteger('smking.delivery.capacity', 1, 1, 8);
-        $leaseSeconds = $this->boundedInteger('smking.delivery.lease_seconds', 15, 15, 60);
-        $flight = $this->cache->lock($this->flightKey($resource, $identifier), $leaseSeconds);
-        if (! $flight->get()) {
-            return null;
-        }
-
-        try {
-            for ($slot = 0; $slot < $slots; $slot++) {
-                $lease = $this->cache->lock($this->capacityKey().':slot:'.$slot, $leaseSeconds);
-                if (! $lease->get()) {
-                    continue;
-                }
-                try {
-                    return $operation();
-                } finally {
-                    $lease->release();
-                }
-            }
-
-            return null;
-        } finally {
-            $flight->release();
-        }
-    }
-
     private function withLock(string $key, callable $operation): mixed
     {
         $lock = $this->cache->lock($key.':mutex', 5);
@@ -494,18 +606,6 @@ final class OnDemandDelivery
         } finally {
             $lock->release();
         }
-    }
-
-    private function supportsCrossProcessLocks(): bool
-    {
-        if (! method_exists($this->cache, 'getStore')) {
-            return false;
-        }
-
-        $store = $this->cache->getStore();
-
-        return $store instanceof LockProvider
-            && ($store instanceof FileStore || $store instanceof RedisStore);
     }
 
     private function resourceEnabled(string $resource): bool
@@ -538,6 +638,9 @@ final class OnDemandDelivery
                 'cache_unavailable',
                 'capacity',
                 'invalid_response',
+                'superseded',
+                'target_mismatch',
+                'target_pending',
                 'transport',
                 'upstream',
             ], true)
@@ -653,16 +756,6 @@ final class OnDemandDelivery
     private function credentialKey(): string
     {
         return 'smking:delivery:v2:credential:'.$this->site();
-    }
-
-    private function capacityKey(): string
-    {
-        return 'smking:delivery:capacity';
-    }
-
-    private function flightKey(string $resource, string $identifier): string
-    {
-        return $this->capacityKey().':flight:'.$this->site().':'.hash('sha256', $resource.'|'.$identifier);
     }
 
     private function site(): string

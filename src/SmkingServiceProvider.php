@@ -13,14 +13,19 @@ use ReflectionException;
 use Smking\Laravel\Console\CachePurgeCommand;
 use Smking\Laravel\Console\CircuitStatusCommand;
 use Smking\Laravel\Console\DoctorCommand;
+use Smking\Laravel\Console\DeliveryPrewarmCommand;
 use Smking\Laravel\Console\DeliveryReportCommand;
 use Smking\Laravel\Console\DeliveryWorkCommand;
 use Smking\Laravel\Console\InstallCommand;
 use Smking\Laravel\Console\PublishRobotsTxtCommand;
+use Smking\Laravel\Delivery\CmsDeliveryNotification;
+use Smking\Laravel\Delivery\DeliveryCapacity;
 use Smking\Laravel\Delivery\DeliverySnapshot;
 use Smking\Laravel\Delivery\DeliveryReportOutbox;
 use Smking\Laravel\Delivery\DeliveryReportTransport;
+use Smking\Laravel\Delivery\DeliveryTargetState;
 use Smking\Laravel\Delivery\DeliveryWorklist;
+use Smking\Laravel\Delivery\LegacyCmsCache;
 use Smking\Laravel\Delivery\OnDemandDelivery;
 use Smking\Laravel\Delivery\WaitBudget;
 use Smking\Laravel\Http\Controllers\WebhookController;
@@ -57,6 +62,28 @@ class SmkingServiceProvider extends ServiceProvider
 
             return is_int($value) || (is_string($value) && ctype_digit($value)) ? (int) $value : 0;
         };
+
+        $this->app->singleton(DeliveryTargetState::class, function ($app) use ($deliveryCache): DeliveryTargetState {
+            return new DeliveryTargetState(
+                cache: $deliveryCache($app),
+                config: $app->make(\Illuminate\Contracts\Config\Repository::class),
+            );
+        });
+
+        $this->app->singleton(DeliveryCapacity::class, function ($app) use ($deliveryCache): DeliveryCapacity {
+            return new DeliveryCapacity(
+                cache: $deliveryCache($app),
+                config: $app->make(\Illuminate\Contracts\Config\Repository::class),
+            );
+        });
+
+        $this->app->singleton(LegacyCmsCache::class, function ($app): LegacyCmsCache {
+            return new LegacyCmsCache(
+                cache: $app->make(\Illuminate\Contracts\Cache\Factory::class),
+                config: $app->make(\Illuminate\Contracts\Config\Repository::class),
+                capacity: $app->make(DeliveryCapacity::class),
+            );
+        });
 
         $this->app->singleton(DeliveryWorklist::class, function ($app) use ($deliveryCache, $deliveryInteger): DeliveryWorklist {
             $config = $app->make(\Illuminate\Contracts\Config\Repository::class);
@@ -102,6 +129,32 @@ class SmkingServiceProvider extends ServiceProvider
                     : DeliverySnapshot::CACHE_FORMAT,
                 worklist: $app->make(DeliveryWorklist::class),
                 reports: $app->make(DeliveryReportOutbox::class),
+                targets: $app->make(DeliveryTargetState::class),
+                capacity: $app->make(DeliveryCapacity::class),
+            );
+        });
+
+        $this->app->singleton(CmsDeliveryNotification::class, function ($app): CmsDeliveryNotification {
+            return new CmsDeliveryNotification(
+                config: $app->make(\Illuminate\Contracts\Config\Repository::class),
+                targets: $app->make(DeliveryTargetState::class),
+                worklist: $app->make(DeliveryWorklist::class),
+                delivery: $app->make(OnDemandDelivery::class),
+                legacy: $app->make(LegacyCmsCache::class),
+            );
+        });
+
+        $this->app->bind(WebhookController::class, function ($app): WebhookController {
+            return new WebhookController(
+                config: $app->make(\Illuminate\Contracts\Config\Repository::class),
+                cache: $app->make(\Illuminate\Contracts\Cache\Factory::class),
+                aeoCacheInvalidator: $app->make(\Smking\Laravel\Support\AeoCacheInvalidator::class),
+                logger: $app->bound(\Psr\Log\LoggerInterface::class)
+                    ? $app->make(\Psr\Log\LoggerInterface::class)
+                    : null,
+                cmsCache: $app->make(LegacyCmsCache::class),
+                delivery: $app->make(OnDemandDelivery::class),
+                deliveryNotification: $app->make(CmsDeliveryNotification::class),
             );
         });
 
@@ -145,6 +198,7 @@ class SmkingServiceProvider extends ServiceProvider
                     : null,
                 delivery: $app->make(OnDemandDelivery::class),
                 deliveryBudget: static fn (): WaitBudget => $app->make(WaitBudget::class),
+                legacyCache: $app->make(LegacyCmsCache::class),
             );
         });
 
@@ -201,6 +255,7 @@ class SmkingServiceProvider extends ServiceProvider
         if ($this->app->runningInConsole()) {
             $this->commands([
                 DoctorCommand::class,
+                DeliveryPrewarmCommand::class,
                 DeliveryReportCommand::class,
                 DeliveryWorkCommand::class,
                 CachePurgeCommand::class,
