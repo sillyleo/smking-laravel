@@ -15,6 +15,9 @@ use Smking\Laravel\Console\CircuitStatusCommand;
 use Smking\Laravel\Console\DoctorCommand;
 use Smking\Laravel\Console\InstallCommand;
 use Smking\Laravel\Console\PublishRobotsTxtCommand;
+use Smking\Laravel\Delivery\DeliverySnapshot;
+use Smking\Laravel\Delivery\OnDemandDelivery;
+use Smking\Laravel\Delivery\WaitBudget;
 use Smking\Laravel\Http\Controllers\WebhookController;
 use Smking\Laravel\Http\Middleware\InjectAeo;
 use Smking\Laravel\Http\Middleware\TrackCrawlerHit;
@@ -35,6 +38,36 @@ class SmkingServiceProvider extends ServiceProvider
         // surfacing as a null cms_base_path on heartbeat. See ConfigMerge.
         $this->mergeConfigRecursivelyFrom(__DIR__.'/../config/smking.php', 'smking');
 
+        $this->app->singleton(OnDemandDelivery::class, function ($app): OnDemandDelivery {
+            $config = $app->make(\Illuminate\Contracts\Config\Repository::class);
+            $cacheConfig = $config->get('smking.cache', []);
+            $store = is_array($cacheConfig) ? ($cacheConfig['store'] ?? null) : null;
+            $format = $config->get('smking.delivery.cache_format', DeliverySnapshot::CACHE_FORMAT);
+            $format = is_int($format) || (is_string($format) && ctype_digit($format))
+                ? (int) $format
+                : DeliverySnapshot::CACHE_FORMAT;
+
+            return new OnDemandDelivery(
+                cache: $store
+                    ? $app->make(\Illuminate\Contracts\Cache\Factory::class)->store($store)
+                    : $app->make(\Illuminate\Contracts\Cache\Factory::class)->store(),
+                http: $app->make(\Illuminate\Http\Client\Factory::class),
+                config: $config,
+                cacheFormat: $format > 0 && $format <= 100
+                    ? $format
+                    : DeliverySnapshot::CACHE_FORMAT,
+            );
+        });
+
+        $this->app->scoped(WaitBudget::class, function ($app): WaitBudget {
+            $value = $app['config']->get('smking.delivery.page_budget_ms', 500);
+            $milliseconds = is_int($value) || (is_string($value) && ctype_digit($value))
+                ? (int) $value
+                : 0;
+
+            return new WaitBudget(max(0, min(2000, $milliseconds)));
+        });
+
         $this->app->singleton(AeoClient::class, function ($app): AeoClient {
             return new AeoClient(
                 http: $app->make(\Illuminate\Http\Client\Factory::class),
@@ -43,6 +76,8 @@ class SmkingServiceProvider extends ServiceProvider
                 logger: $app->bound(\Psr\Log\LoggerInterface::class)
                     ? $app->make(\Psr\Log\LoggerInterface::class)
                     : null,
+                delivery: $app->make(OnDemandDelivery::class),
+                deliveryBudget: static fn (): WaitBudget => $app->make(WaitBudget::class),
             );
         });
 
@@ -62,6 +97,8 @@ class SmkingServiceProvider extends ServiceProvider
                 logger: $app->bound(\Psr\Log\LoggerInterface::class)
                     ? $app->make(\Psr\Log\LoggerInterface::class)
                     : null,
+                delivery: $app->make(OnDemandDelivery::class),
+                deliveryBudget: static fn (): WaitBudget => $app->make(WaitBudget::class),
             );
         });
 

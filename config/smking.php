@@ -29,6 +29,27 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | On-demand delivery
+    |--------------------------------------------------------------------------
+    |
+    | The new v2 read path is opt-in. Existing installations stay on the
+    | legacy clients unless SMKING_DELIVERY_MODE is explicitly set to
+    | "on_demand". AEO can be paused independently without hiding CMS pages.
+    |
+    */
+    'delivery' => [
+        'mode' => env('SMKING_DELIVERY_MODE', 'legacy'),
+        'aeo_enabled' => env('SMKING_DELIVERY_AEO_ENABLED', true),
+        'cache_format' => 1,
+        'page_budget_ms' => env('SMKING_DELIVERY_PAGE_BUDGET_MS', 500),
+        'capacity' => env('SMKING_DELIVERY_CAPACITY', 1),
+        'lease_seconds' => env('SMKING_DELIVERY_LEASE_SECONDS', 15),
+        'circuit_seconds' => env('SMKING_DELIVERY_CIRCUIT_SECONDS', 30),
+        'connect_timeout' => env('SMKING_DELIVERY_CONNECT_TIMEOUT', 0.5),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Webhook (v0.11.0+ — push-invalidate customer cache on SaaS publish)
     |--------------------------------------------------------------------------
     |
