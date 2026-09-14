@@ -239,7 +239,7 @@ return [
         // who want a longer miss cushion (worker-pool stampede protection
         // is already covered by `pending_ttl` + `circuit_breaker`) can
         // set `SMKING_NOT_FOUND_TTL` to a higher value.
-        'not_found_ttl' => env('SMKING_NOT_FOUND_TTL', 60),
+        'not_found_ttl' => env('SMKING_NOT_FOUND_TTL', Defaults::NOT_FOUND_TTL_SECONDS),
 
         // 5xx / DNS / TCP / read timeout — long TTL since SaaS is broken.
         // v0.10.0: adaptive backoff replaces flat 24hr — see

@@ -196,7 +196,7 @@ class AeoClient
                     $failCount = $this->bumpFailureCount($repository, $cacheKey);
                     $writeTtl = $this->backoffTtlForFailures($cacheConfig, $failCount);
                 } else {
-                    $writeTtl = min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900));
+                    $writeTtl = min($ttl, $this->notFoundTtl($cacheConfig));
                 }
                 $repository->put($cacheKey, false, $writeTtl);
 
@@ -620,7 +620,7 @@ class AeoClient
         return $this->singleFlight($repository, $cacheKey, $transportAwareResolver, function (AeoResponse $response) use ($repository, $cacheKey, $cacheConfig, $ttl): void {
             // Four-tier TTL with adaptive server_error backoff (v0.10.0):
             //   ready        → full ttl (default 1hr)
-            //   not_found    → not_found_ttl (default 15min)
+            //   not_found    → not_found_ttl (default 60s)
             //   server_error → 30s → 5min → 30min → server_error_ttl (default 24hr)
             //                  Escalates per consecutive failure so install
             //                  typos / firewall issues auto-recover in
@@ -632,7 +632,7 @@ class AeoClient
             //                  ready
             $writeTtl = match ($response->status) {
                 AeoResponse::STATUS_READY => $ttl,
-                AeoResponse::STATUS_NOT_FOUND => min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900)),
+                AeoResponse::STATUS_NOT_FOUND => min($ttl, $this->notFoundTtl($cacheConfig)),
                 AeoResponse::STATUS_SERVER_ERROR => $this->backoffTtlForFailures(
                     $cacheConfig,
                     $this->bumpFailureCount($repository, $cacheKey),
@@ -1018,7 +1018,7 @@ class AeoClient
                 'message' => $e->getMessage(),
             ]);
             if ($enabled && $ttl > 0) {
-                $missTtl = min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900));
+                $missTtl = min($ttl, $this->notFoundTtl($cacheConfig));
                 $repository->put($cacheKey, false, $missTtl);
             }
 
@@ -1029,7 +1029,7 @@ class AeoClient
             if ($enabled && $ttl > 0) {
                 $missTtl = $response->status() >= 500
                     ? (int) ($cacheConfig['server_error_ttl'] ?? 86400)
-                    : min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900));
+                    : min($ttl, $this->notFoundTtl($cacheConfig));
                 $repository->put($cacheKey, false, $missTtl);
             }
 
@@ -1105,7 +1105,7 @@ class AeoClient
                 : null,
             'cache_enabled' => (bool) ($cacheConfig['enabled'] ?? true),
             'ready_ttl_seconds' => max(0, (int) ($cacheConfig['ttl'] ?? 3600)),
-            'not_found_ttl_seconds' => max(0, (int) ($cacheConfig['not_found_ttl'] ?? 60)),
+            'not_found_ttl_seconds' => $this->notFoundTtl($cacheConfig),
             'circuit_breaker_enabled' => (bool) ($cacheConfig['circuit_breaker'] ?? true),
             'circuit_breaker_ttl_seconds' => max(0, (int) ($cacheConfig['circuit_breaker_ttl'] ?? 60)),
             'cold_start_retry_enabled' => $this->coldStartRetryEnabled(),
@@ -1313,6 +1313,12 @@ class AeoClient
         }
 
         return null;
+    }
+
+    /** @param array<string, mixed> $cacheConfig */
+    private function notFoundTtl(array $cacheConfig): int
+    {
+        return max(0, (int) ($cacheConfig['not_found_ttl'] ?? Defaults::NOT_FOUND_TTL_SECONDS));
     }
 
     /**
