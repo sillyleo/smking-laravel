@@ -13,9 +13,14 @@ use ReflectionException;
 use Smking\Laravel\Console\CachePurgeCommand;
 use Smking\Laravel\Console\CircuitStatusCommand;
 use Smking\Laravel\Console\DoctorCommand;
+use Smking\Laravel\Console\DeliveryReportCommand;
+use Smking\Laravel\Console\DeliveryWorkCommand;
 use Smking\Laravel\Console\InstallCommand;
 use Smking\Laravel\Console\PublishRobotsTxtCommand;
 use Smking\Laravel\Delivery\DeliverySnapshot;
+use Smking\Laravel\Delivery\DeliveryReportOutbox;
+use Smking\Laravel\Delivery\DeliveryReportTransport;
+use Smking\Laravel\Delivery\DeliveryWorklist;
 use Smking\Laravel\Delivery\OnDemandDelivery;
 use Smking\Laravel\Delivery\WaitBudget;
 use Smking\Laravel\Http\Controllers\WebhookController;
@@ -38,24 +43,65 @@ class SmkingServiceProvider extends ServiceProvider
         // surfacing as a null cms_base_path on heartbeat. See ConfigMerge.
         $this->mergeConfigRecursivelyFrom(__DIR__.'/../config/smking.php', 'smking');
 
-        $this->app->singleton(OnDemandDelivery::class, function ($app): OnDemandDelivery {
+        $deliveryCache = static function ($app) {
             $config = $app->make(\Illuminate\Contracts\Config\Repository::class);
             $cacheConfig = $config->get('smking.cache', []);
             $store = is_array($cacheConfig) ? ($cacheConfig['store'] ?? null) : null;
+
+            return $store
+                ? $app->make(\Illuminate\Contracts\Cache\Factory::class)->store($store)
+                : $app->make(\Illuminate\Contracts\Cache\Factory::class)->store();
+        };
+        $deliveryInteger = static function ($config, string $name, int $default): int {
+            $value = $config->get('smking.delivery.'.$name, $default);
+
+            return is_int($value) || (is_string($value) && ctype_digit($value)) ? (int) $value : 0;
+        };
+
+        $this->app->singleton(DeliveryWorklist::class, function ($app) use ($deliveryCache, $deliveryInteger): DeliveryWorklist {
+            $config = $app->make(\Illuminate\Contracts\Config\Repository::class);
+
+            return new DeliveryWorklist(
+                cache: $deliveryCache($app),
+                config: $config,
+                maxItems: $deliveryInteger($config, 'work_items', 100),
+                heartbeatSeconds: $deliveryInteger($config, 'heartbeat_seconds', 180),
+            );
+        });
+
+        $this->app->singleton(DeliveryReportOutbox::class, function ($app) use ($deliveryCache, $deliveryInteger): DeliveryReportOutbox {
+            $config = $app->make(\Illuminate\Contracts\Config\Repository::class);
+
+            return new DeliveryReportOutbox(
+                cache: $deliveryCache($app),
+                config: $config,
+                heartbeatSeconds: $deliveryInteger($config, 'heartbeat_seconds', 180),
+            );
+        });
+
+        $this->app->singleton(DeliveryReportTransport::class, function ($app): DeliveryReportTransport {
+            return new DeliveryReportTransport(
+                http: $app->make(\Illuminate\Http\Client\Factory::class),
+                config: $app->make(\Illuminate\Contracts\Config\Repository::class),
+            );
+        });
+
+        $this->app->singleton(OnDemandDelivery::class, function ($app) use ($deliveryCache): OnDemandDelivery {
+            $config = $app->make(\Illuminate\Contracts\Config\Repository::class);
             $format = $config->get('smking.delivery.cache_format', DeliverySnapshot::CACHE_FORMAT);
             $format = is_int($format) || (is_string($format) && ctype_digit($format))
                 ? (int) $format
                 : DeliverySnapshot::CACHE_FORMAT;
 
             return new OnDemandDelivery(
-                cache: $store
-                    ? $app->make(\Illuminate\Contracts\Cache\Factory::class)->store($store)
-                    : $app->make(\Illuminate\Contracts\Cache\Factory::class)->store(),
+                cache: $deliveryCache($app),
                 http: $app->make(\Illuminate\Http\Client\Factory::class),
                 config: $config,
                 cacheFormat: $format > 0 && $format <= 100
                     ? $format
                     : DeliverySnapshot::CACHE_FORMAT,
+                worklist: $app->make(DeliveryWorklist::class),
+                reports: $app->make(DeliveryReportOutbox::class),
             );
         });
 
@@ -155,6 +201,8 @@ class SmkingServiceProvider extends ServiceProvider
         if ($this->app->runningInConsole()) {
             $this->commands([
                 DoctorCommand::class,
+                DeliveryReportCommand::class,
+                DeliveryWorkCommand::class,
                 CachePurgeCommand::class,
                 CircuitStatusCommand::class,
                 InstallCommand::class,

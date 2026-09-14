@@ -45,6 +45,9 @@ class AeoClient
      */
     public function forPath(string $path, ?string $url = null): AeoResponse
     {
+        if ($this->deliveryMode() === null) {
+            return AeoResponse::notFound();
+        }
         if ($this->usesOnDemandDelivery()) {
             return $this->onDemandAeo('path:'.$path);
         }
@@ -56,6 +59,9 @@ class AeoClient
 
     public function forProductId(int $productId): AeoResponse
     {
+        if ($this->deliveryMode() === null) {
+            return AeoResponse::notFound();
+        }
         if ($this->usesOnDemandDelivery()) {
             return $this->onDemandAeo('product_id:'.$productId);
         }
@@ -78,6 +84,9 @@ class AeoClient
      */
     public function getMarkdown(string $path): ?string
     {
+        if ($this->deliveryMode() === null) {
+            return null;
+        }
         if ($this->usesOnDemandDelivery()) {
             $result = $this->onDemandRead('markdown', 'path:'.$path);
             $document = $result?->snapshot?->payload['document'] ?? null;
@@ -995,6 +1004,9 @@ class AeoClient
      */
     public function fetchPublicFile(string $kind): ?array
     {
+        if ($this->deliveryMode() === null) {
+            return null;
+        }
         if ($this->usesOnDemandDelivery()) {
             $result = $this->onDemandRead('site-file', 'kind:'.$kind);
             $document = $result?->snapshot?->payload['document'] ?? null;
@@ -1098,7 +1110,14 @@ class AeoClient
 
     private function usesOnDemandDelivery(): bool
     {
-        return $this->config->get('smking.delivery.mode') === 'on_demand';
+        return $this->deliveryMode() === 'on_demand';
+    }
+
+    private function deliveryMode(): ?string
+    {
+        $mode = $this->config->get('smking.delivery.mode', 'legacy');
+
+        return in_array($mode, ['legacy', 'on_demand'], true) ? $mode : null;
     }
 
     private function onDemandAeo(string $identifier): AeoResponse

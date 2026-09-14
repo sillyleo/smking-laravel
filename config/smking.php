@@ -46,6 +46,10 @@ return [
         'lease_seconds' => env('SMKING_DELIVERY_LEASE_SECONDS', 15),
         'circuit_seconds' => env('SMKING_DELIVERY_CIRCUIT_SECONDS', 30),
         'connect_timeout' => env('SMKING_DELIVERY_CONNECT_TIMEOUT', 0.5),
+        'work_items' => env('SMKING_DELIVERY_WORK_ITEMS', 100),
+        'work_max_jobs' => env('SMKING_DELIVERY_WORK_MAX_JOBS', 10),
+        'work_budget_ms' => env('SMKING_DELIVERY_WORK_BUDGET_MS', 5000),
+        'heartbeat_seconds' => env('SMKING_DELIVERY_HEARTBEAT_SECONDS', 180),
     ],
 
     /*

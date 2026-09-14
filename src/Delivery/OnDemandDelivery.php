@@ -39,6 +39,8 @@ final class OnDemandDelivery
         private readonly ConfigRepository $config,
         ?Closure $clock = null,
         private readonly int $cacheFormat = DeliverySnapshot::CACHE_FORMAT,
+        private readonly ?DeliveryWorklist $worklist = null,
+        private readonly ?DeliveryReportOutbox $reports = null,
     ) {
         $this->clock = $clock ?? static fn (): int => (int) floor(microtime(true) * 1000);
     }
@@ -48,7 +50,7 @@ final class OnDemandDelivery
         if (! $this->configured()) {
             return new DeliveryResult(error: 'configuration');
         }
-        if (self::parameters($resource, $identifier) === null) {
+        if (DeliveryIdentifier::parameters($resource, $identifier) === null) {
             return new DeliveryResult(error: 'invalid_identifier');
         }
         if (! $this->resourceEnabled($resource)) {
@@ -63,25 +65,43 @@ final class OnDemandDelivery
 
             $cached = $this->cached($resource, $identifier);
             if ($cached->snapshot !== null) {
+                $this->scheduleBackground($resource, $identifier, $cached);
+
                 return $cached;
             }
 
             if (in_array($resource, ['aeo', 'markdown'], true)) {
-                return new DeliveryResult(error: 'cache_miss', refreshRequired: true);
+                $result = new DeliveryResult(error: 'cache_miss', refreshRequired: true);
+                $this->scheduleBackground($resource, $identifier, $result);
+
+                return $result;
             }
 
-            return $this->refresh($resource, $identifier, $budget);
+            $result = $this->refresh($resource, $identifier, $budget);
+            $this->scheduleBackground($resource, $identifier, $result);
+
+            return $result;
         } catch (Throwable) {
+            $this->reports?->recordFailure('cache_unavailable');
+
             return new DeliveryResult(error: 'cache_unavailable');
         }
     }
 
     public function refresh(string $resource, string $identifier, WaitBudget $budget): DeliveryResult
     {
+        $result = $this->performRefresh($resource, $identifier, $budget);
+        $this->reports?->recordFailure($result->error);
+
+        return $result;
+    }
+
+    private function performRefresh(string $resource, string $identifier, WaitBudget $budget): DeliveryResult
+    {
         if (! $this->configured()) {
             return new DeliveryResult(error: 'configuration');
         }
-        if (self::parameters($resource, $identifier) === null) {
+        if (DeliveryIdentifier::parameters($resource, $identifier) === null) {
             return new DeliveryResult(error: 'invalid_identifier');
         }
         if (! $this->resourceEnabled($resource)) {
@@ -125,7 +145,7 @@ final class OnDemandDelivery
                     return new DeliveryResult(error: 'budget_exhausted');
                 }
                 if ($fetched->snapshot === null) {
-                    $this->recordFailure($resource, $fetched);
+                    $this->recordControlFailure($resource, $fetched);
 
                     return $fetched;
                 }
@@ -145,7 +165,7 @@ final class OnDemandDelivery
     public function invalidate(string $resource, string $identifier): bool
     {
         if (! $this->configured()
-            || self::parameters($resource, $identifier) === null
+            || DeliveryIdentifier::parameters($resource, $identifier) === null
             || ! $this->supportsCrossProcessLocks()
         ) {
             return false;
@@ -238,7 +258,7 @@ final class OnDemandDelivery
             return new DeliveryResult(error: 'budget_exhausted');
         }
 
-        $parameters = self::parameters($resource, $identifier);
+        $parameters = DeliveryIdentifier::parameters($resource, $identifier);
         $baseUrl = $this->baseUrl();
         $apiKey = $this->apiKey();
         if ($parameters === null || ! $this->validConfiguration($baseUrl, $apiKey)) {
@@ -301,7 +321,7 @@ final class OnDemandDelivery
             : new DeliveryResult(snapshot: $snapshot, httpStatus: $response->status());
     }
 
-    private function recordFailure(string $resource, DeliveryResult $result): void
+    private function recordControlFailure(string $resource, DeliveryResult $result): void
     {
         if ($result->httpStatus === 401 || $result->denialScope === 'site') {
             if (! $this->put($this->credentialKey(), [
@@ -501,50 +521,29 @@ final class OnDemandDelivery
             && $this->cacheFormat <= 100;
     }
 
-    /**
-     * @return array<string, string|int>|null
-     */
-    private static function parameters(string $resource, string $identifier): ?array
+    private function scheduleBackground(string $resource, string $identifier, DeliveryResult $result): void
     {
-        if ($resource === 'cms-page' && str_starts_with($identifier, 'slug:')) {
-            $slug = substr($identifier, 5);
-            if (strlen($slug) > 200
-                || str_starts_with($slug, '/')
-                || str_ends_with($slug, '/')
-                || preg_match('/[?#\\\\\x00-\x1f\x7f]/', $slug)
-                || in_array('.', explode('/', $slug), true)
-                || in_array('..', explode('/', $slug), true)
-            ) {
-                return null;
-            }
-
-            return ['slug' => $slug];
-        }
-
-        if ($resource === 'site-file' && in_array($identifier, ['kind:sitemap', 'kind:robots', 'kind:llms_txt'], true)) {
-            return ['kind' => substr($identifier, 5)];
-        }
-
-        if (in_array($resource, ['aeo', 'markdown'], true) && str_starts_with($identifier, 'path:/')) {
-            $path = substr($identifier, 5);
-            if (strlen($path) > 500
-                || str_starts_with($path, '//')
-                || preg_match('/[?#\\\\\x00-\x1f\x7f]/', $path)
-            ) {
-                return null;
-            }
-
-            return ['path' => $path];
-        }
-
-        if (in_array($resource, ['aeo', 'markdown'], true)
-            && preg_match('/^product_id:([1-9][0-9]*)$/D', $identifier, $matches) === 1
-            && (float) $matches[1] <= 2_147_483_647
+        if ($resource === 'aeo'
+            && $result->error === 'cache_miss'
+            && str_starts_with($identifier, 'path:')
         ) {
-            return ['product_id' => (int) $matches[1]];
+            $this->reports?->observePath(substr($identifier, 5));
         }
-
-        return null;
+        if ($result->refreshRequired
+            || in_array($result->error, [
+                'backoff',
+                'budget_exhausted',
+                'cache_busy',
+                'cache_miss',
+                'cache_unavailable',
+                'capacity',
+                'invalid_response',
+                'transport',
+                'upstream',
+            ], true)
+        ) {
+            $this->worklist?->schedule($resource, $identifier);
+        }
     }
 
     private function validConfiguration(string $baseUrl, string $apiKey): bool

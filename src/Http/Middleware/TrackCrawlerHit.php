@@ -8,22 +8,21 @@ use Closure;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Http\Request;
+use Smking\Laravel\Delivery\DeliveryReportOutbox;
 use Symfony\Component\HttpFoundation\Response;
 use Throwable;
 
 /**
  * TrackCrawlerHit — AI bot + AI referral 偵測（Laravel SDK side）。
  *
- * Mirrors WP plugin AICB_Crawler_Tracker and Next.js smkingProxy. Runs as
- * terminable middleware so the network call happens AFTER the response has
- * been sent. On PHP-FPM with `fastcgi_finish_request`, customers feel zero
- * latency; on classic CGI, this still completes after the response has
- * been buffered out, so the user-perceived TTFB isn't affected — only the
- * total connection close timing.
+ * Mirrors WP plugin AICB_Crawler_Tracker and Next.js smkingProxy. Legacy mode
+ * retains the terminable HTTP report. On-demand mode only appends to a bounded
+ * local outbox; a separate CLI tick owns all report HTTP.
  *
  * Failure modes:
  *   - Missing api_key / base_url → silent skip
- *   - Network / timeout / 4xx / 5xx → swallowed (response already sent)
+ *   - Legacy network / timeout / 4xx / 5xx → swallowed (response already sent)
+ *   - On-demand outbox unavailable / full → observable local loss, no fallback POST
  *
  * Design contract:
  *   - NEVER throws into customer code (terminate() is wrapped in try/catch)
@@ -55,6 +54,7 @@ class TrackCrawlerHit
     public function __construct(
         private readonly HttpFactory $http,
         private readonly ConfigRepository $config,
+        private readonly ?DeliveryReportOutbox $reports = null,
     ) {
     }
 
@@ -68,9 +68,8 @@ class TrackCrawlerHit
     }
 
     /**
-     * Laravel's terminable hook — called after the response has been sent
-     * back to the customer. We classify + POST here so the customer never
-     * waits on smking ingestion.
+     * Laravel's terminable hook. On-demand mode only classifies and buffers;
+     * legacy mode retains its existing POST contract.
      */
     public function terminate(Request $request, Response $response): void
     {
@@ -83,8 +82,23 @@ class TrackCrawlerHit
                 return;
             }
 
+            $mode = $this->config->get('smking.delivery.mode', 'legacy');
+            if (! in_array($mode, ['legacy', 'on_demand'], true)) {
+                return;
+            }
+
             $hit = $this->classify($request);
             if ($hit === null) {
+                return;
+            }
+
+            if ($mode === 'on_demand') {
+                $this->reports?->capture(
+                    $hit,
+                    mb_substr('/'.ltrim($request->path(), '/'), 0, 500),
+                    $response->getStatusCode(),
+                );
+
                 return;
             }
 

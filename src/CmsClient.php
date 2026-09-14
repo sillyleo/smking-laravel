@@ -55,6 +55,10 @@ class CmsClient
             return $this->fetch($slug);
         }
 
+        if ($this->deliveryMode() === null) {
+            return CmsPage::serverError();
+        }
+
         if ($this->usesOnDemandDelivery()) {
             return $this->onDemandPage($slug);
         }
@@ -199,7 +203,14 @@ class CmsClient
 
     private function usesOnDemandDelivery(): bool
     {
-        return $this->config->get('smking.delivery.mode') === 'on_demand';
+        return $this->deliveryMode() === 'on_demand';
+    }
+
+    private function deliveryMode(): ?string
+    {
+        $mode = $this->config->get('smking.delivery.mode', 'legacy');
+
+        return in_array($mode, ['legacy', 'on_demand'], true) ? $mode : null;
     }
 
     private function onDemandPage(string $slug): CmsPage
