@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.22.0 — Opt-in on-demand delivery (2026-09-18)
+
+This release makes the Laravel delivery client available for isolated testing;
+it does not switch existing installations to the new path. The default remains
+`SMKING_DELIVERY_MODE=legacy`, CMS v2 notifications remain off, and no scheduler
+is installed or started by the package.
+
+### Added
+- Versioned AEO and CMS cache entries, bounded cross-page capacity and wait
+  budgets, stale-content protection, circuit breaking, and explicit prewarm
+  and rollback checks for the opt-in mode.
+- Bounded background refresh and independent reporting commands. Crawler-hit
+  reporting no longer needs a synchronous visitor or `terminate()` POST in
+  the opt-in mode.
+- Version-aware CMS update and withdrawal notifications, disabled by default.
+
+### Compatibility and rollout
+- Keep the existing AEO POST and CMS GET behavior when the mode is `legacy`;
+  AEO can be paused independently while existing Blog content remains visible.
+- Align effective `not_found_ttl` handling across configuration, cache writes,
+  and SDK reporting, including missing and `null` values.
+- Publishing this package does not apply SaaS migrations, enable CDN delivery,
+  change a customer's configuration, or prove CDN HIT or production capacity.
+  Do not enable the new mode on customer traffic before isolated integration
+  and host-specific rollback validation.
+- Composer constraints using `^0.21` do not select `0.22.0`; an application
+  must deliberately change its constraint and lock file to upgrade.
+
 ## v0.21.8 — Response-aware CMS routes (2026-09-01)
 
 ### Added

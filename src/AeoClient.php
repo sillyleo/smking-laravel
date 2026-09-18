@@ -4,12 +4,16 @@ declare(strict_types=1);
 
 namespace Smking\Laravel;
 
+use Closure;
 use Composer\InstalledVersions;
 use Illuminate\Contracts\Cache\Factory as CacheFactory;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Psr\Log\LoggerInterface;
 use Smking\Laravel\Data\AeoResponse;
+use Smking\Laravel\Delivery\DeliveryResult;
+use Smking\Laravel\Delivery\OnDemandDelivery;
+use Smking\Laravel\Delivery\WaitBudget;
 use Throwable;
 
 /**
@@ -30,6 +34,8 @@ class AeoClient
         private readonly CacheFactory $cache,
         private readonly ConfigRepository $config,
         private readonly ?LoggerInterface $logger = null,
+        private readonly ?OnDemandDelivery $delivery = null,
+        private readonly ?Closure $deliveryBudget = null,
     ) {
     }
 
@@ -39,6 +45,13 @@ class AeoClient
      */
     public function forPath(string $path, ?string $url = null): AeoResponse
     {
+        if ($this->deliveryMode() === null) {
+            return AeoResponse::notFound();
+        }
+        if ($this->usesOnDemandDelivery()) {
+            return $this->onDemandAeo('path:'.$path);
+        }
+
         return $this->remember(['path' => $path], function (callable $onTransportFailure) use ($path, $url) {
             return $this->discover(['path' => $path, 'url' => $url], $onTransportFailure);
         });
@@ -46,6 +59,13 @@ class AeoClient
 
     public function forProductId(int $productId): AeoResponse
     {
+        if ($this->deliveryMode() === null) {
+            return AeoResponse::notFound();
+        }
+        if ($this->usesOnDemandDelivery()) {
+            return $this->onDemandAeo('product_id:'.$productId);
+        }
+
         return $this->remember(['product_id' => $productId], function (callable $onTransportFailure) use ($productId) {
             return $this->discover(['product_id' => $productId], $onTransportFailure);
         });
@@ -64,6 +84,18 @@ class AeoClient
      */
     public function getMarkdown(string $path): ?string
     {
+        if ($this->deliveryMode() === null) {
+            return null;
+        }
+        if ($this->usesOnDemandDelivery()) {
+            $result = $this->onDemandRead('markdown', 'path:'.$path);
+            $document = $result?->snapshot?->payload['document'] ?? null;
+
+            return is_array($document) && is_string($document['body'] ?? null)
+                ? $document['body']
+                : null;
+        }
+
         return $this->rememberMarkdown($path, function () use ($path): array {
             return $this->fetchMarkdown($path);
         });
@@ -196,7 +228,7 @@ class AeoClient
                     $failCount = $this->bumpFailureCount($repository, $cacheKey);
                     $writeTtl = $this->backoffTtlForFailures($cacheConfig, $failCount);
                 } else {
-                    $writeTtl = min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900));
+                    $writeTtl = min($ttl, $this->notFoundTtl($cacheConfig));
                 }
                 $repository->put($cacheKey, false, $writeTtl);
 
@@ -620,7 +652,7 @@ class AeoClient
         return $this->singleFlight($repository, $cacheKey, $transportAwareResolver, function (AeoResponse $response) use ($repository, $cacheKey, $cacheConfig, $ttl): void {
             // Four-tier TTL with adaptive server_error backoff (v0.10.0):
             //   ready        → full ttl (default 1hr)
-            //   not_found    → not_found_ttl (default 15min)
+            //   not_found    → not_found_ttl (default 60s)
             //   server_error → 30s → 5min → 30min → server_error_ttl (default 24hr)
             //                  Escalates per consecutive failure so install
             //                  typos / firewall issues auto-recover in
@@ -632,7 +664,7 @@ class AeoClient
             //                  ready
             $writeTtl = match ($response->status) {
                 AeoResponse::STATUS_READY => $ttl,
-                AeoResponse::STATUS_NOT_FOUND => min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900)),
+                AeoResponse::STATUS_NOT_FOUND => min($ttl, $this->notFoundTtl($cacheConfig)),
                 AeoResponse::STATUS_SERVER_ERROR => $this->backoffTtlForFailures(
                     $cacheConfig,
                     $this->bumpFailureCount($repository, $cacheKey),
@@ -972,6 +1004,25 @@ class AeoClient
      */
     public function fetchPublicFile(string $kind): ?array
     {
+        if ($this->deliveryMode() === null) {
+            return null;
+        }
+        if ($this->usesOnDemandDelivery()) {
+            $result = $this->onDemandRead('site-file', 'kind:'.$kind);
+            $document = $result?->snapshot?->payload['document'] ?? null;
+            if (! is_array($document)
+                || ! is_string($document['body'] ?? null)
+                || ! is_string($document['content_type'] ?? null)
+            ) {
+                return null;
+            }
+
+            return [
+                'body' => $document['body'],
+                'contentType' => $document['content_type'],
+            ];
+        }
+
         $apiKey = $this->apiKey();
         if ($apiKey === null || $this->baseUrl() === null) {
             return null;
@@ -1018,7 +1069,7 @@ class AeoClient
                 'message' => $e->getMessage(),
             ]);
             if ($enabled && $ttl > 0) {
-                $missTtl = min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900));
+                $missTtl = min($ttl, $this->notFoundTtl($cacheConfig));
                 $repository->put($cacheKey, false, $missTtl);
             }
 
@@ -1029,7 +1080,7 @@ class AeoClient
             if ($enabled && $ttl > 0) {
                 $missTtl = $response->status() >= 500
                     ? (int) ($cacheConfig['server_error_ttl'] ?? 86400)
-                    : min($ttl, (int) ($cacheConfig['not_found_ttl'] ?? 900));
+                    : min($ttl, $this->notFoundTtl($cacheConfig));
                 $repository->put($cacheKey, false, $missTtl);
             }
 
@@ -1055,6 +1106,49 @@ class AeoClient
             'robots', 'llms_txt' => 'text/plain; charset=utf-8',
             default => 'text/plain; charset=utf-8',
         };
+    }
+
+    private function usesOnDemandDelivery(): bool
+    {
+        return $this->deliveryMode() === 'on_demand';
+    }
+
+    private function deliveryMode(): ?string
+    {
+        $mode = $this->config->get('smking.delivery.mode', 'legacy');
+
+        return in_array($mode, ['legacy', 'on_demand'], true) ? $mode : null;
+    }
+
+    private function onDemandAeo(string $identifier): AeoResponse
+    {
+        $result = $this->onDemandRead('aeo', $identifier);
+        if ($result?->snapshot !== null) {
+            return AeoResponse::fromArray($result->snapshot->payload);
+        }
+
+        return $result?->httpStatus === 404
+            || in_array($result?->error, ['access_denied', 'cache_miss', 'configuration', 'disabled', 'invalid_identifier'], true)
+                ? AeoResponse::notFound()
+                : AeoResponse::serverError();
+    }
+
+    private function onDemandRead(string $resource, string $identifier): ?DeliveryResult
+    {
+        if ($this->delivery === null || $this->deliveryBudget === null) {
+            return null;
+        }
+
+        try {
+            $budget = ($this->deliveryBudget)();
+            if (! $budget instanceof WaitBudget) {
+                return null;
+            }
+
+            return $this->delivery->read($resource, $identifier, $budget);
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     private function apiKey(): ?string
@@ -1105,7 +1199,7 @@ class AeoClient
                 : null,
             'cache_enabled' => (bool) ($cacheConfig['enabled'] ?? true),
             'ready_ttl_seconds' => max(0, (int) ($cacheConfig['ttl'] ?? 3600)),
-            'not_found_ttl_seconds' => max(0, (int) ($cacheConfig['not_found_ttl'] ?? 60)),
+            'not_found_ttl_seconds' => $this->notFoundTtl($cacheConfig),
             'circuit_breaker_enabled' => (bool) ($cacheConfig['circuit_breaker'] ?? true),
             'circuit_breaker_ttl_seconds' => max(0, (int) ($cacheConfig['circuit_breaker_ttl'] ?? 60)),
             'cold_start_retry_enabled' => $this->coldStartRetryEnabled(),
@@ -1313,6 +1407,12 @@ class AeoClient
         }
 
         return null;
+    }
+
+    /** @param array<string, mixed> $cacheConfig */
+    private function notFoundTtl(array $cacheConfig): int
+    {
+        return max(0, (int) ($cacheConfig['not_found_ttl'] ?? Defaults::NOT_FOUND_TTL_SECONDS));
     }
 
     /**

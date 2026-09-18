@@ -1,0 +1,7 @@
+{
+    "reference": "2D safe rollback candidate; current package in legacy mode, not historical v0.21.7",
+    "monorepoCommit": "20cfe6627ed51ab6eb322d79ebf4635144369637",
+    "tree": "12f514f61d93fb7c4b6d8ea953740f72a139f814",
+    "archiveSha256": "7fead72b7230f0a4fed0686dfab3e408f5c864bb7fea38b295ef00a946ed61d8",
+    "laravel10LockSha256": "e93cc877b2393b6f2307132df0cc2414220ea61d774243289a8125596b940590"
+}

@@ -330,6 +330,22 @@ events and the circuit breaker must coordinate across PHP-FPM workers. The
 Telemetry excludes API keys, raw paths/URLs, query strings, exception text,
 request/response bodies, and customer content.
 
+## On-demand delivery (v0.22.0, opt-in)
+
+Installing v0.22.0 alone does not change the active delivery mode. The package
+defaults to `SMKING_DELIVERY_MODE=legacy`, continues using the existing AEO POST
+and CMS GET clients, and leaves versioned CMS notifications disabled. It does
+not register a scheduler. The new v2 content GET, versioned cache, bounded
+background work, independent reporting, prewarm, and rollback checks are for
+an explicitly prepared isolated rollout; they are not a production enablement
+instruction.
+
+Keep the customer site's `composer.lock` unchanged until that site is ready to
+test this version. SaaS migrations, delivery flags, CDN behavior, and the
+customer's worker and rollback procedure need separate validation before
+setting `SMKING_DELIVERY_MODE=on_demand`. Releasing this package does not enable
+any of those dependencies.
+
 ## Upgrading
 
 This package is in `v0.x`. Per Composer's caret convention for pre-1.0 packages, **every minor bump (0.5 → 0.6, 0.6 → 0.7) is treated as breaking** — the constraint `"smking/laravel": "^0.6"` resolves to `>=0.6.0 <0.7.0` and `composer update` won't cross into 0.7.

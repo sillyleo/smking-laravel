@@ -4,11 +4,16 @@ declare(strict_types=1);
 
 namespace Smking\Laravel;
 
+use Closure;
 use Illuminate\Contracts\Cache\Factory as CacheFactory;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Psr\Log\LoggerInterface;
 use Smking\Laravel\Data\CmsPage;
+use Smking\Laravel\Delivery\DeliveryResult;
+use Smking\Laravel\Delivery\LegacyCmsCache;
+use Smking\Laravel\Delivery\OnDemandDelivery;
+use Smking\Laravel\Delivery\WaitBudget;
 use Smking\Laravel\Tiptap\EditorFactory;
 use Throwable;
 
@@ -34,6 +39,9 @@ class CmsClient
         private readonly ConfigRepository $config,
         private readonly EditorFactory $editor,
         private readonly ?LoggerInterface $logger = null,
+        private readonly ?OnDemandDelivery $delivery = null,
+        private readonly ?Closure $deliveryBudget = null,
+        private readonly ?LegacyCmsCache $legacyCache = null,
     ) {
     }
 
@@ -49,7 +57,23 @@ class CmsClient
             return $this->fetch($slug);
         }
 
-        return $this->remember($slug, fn (): CmsPage => $this->fetch($slug));
+        if ($this->deliveryMode() === null) {
+            return CmsPage::serverError();
+        }
+
+        $published = $this->targetedPage($slug);
+        if ($published !== null) {
+            return $published;
+        }
+
+        if ($this->usesOnDemandDelivery()) {
+            return $this->onDemandPage($slug);
+        }
+
+        $page = $this->legacyCache?->remember($slug, fn (): CmsPage => $this->fetch($slug))
+            ?? $this->remember($slug, fn (): CmsPage => $this->fetch($slug));
+
+        return $this->targetedPage($slug) ?? $page;
     }
 
     /**
@@ -143,6 +167,14 @@ class CmsClient
             return CmsPage::notFound();
         }
 
+        return $this->pageFromPayload($payload);
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    private function pageFromPayload(array $payload): CmsPage
+    {
         $status = (string) ($payload['status'] ?? CmsPage::STATUS_NOT_FOUND);
         if ($status !== CmsPage::STATUS_READY && $status !== CmsPage::STATUS_PREVIEW) {
             return new CmsPage(status: $status);
@@ -177,6 +209,74 @@ class CmsClient
         }
 
         return CmsPage::notFound();
+    }
+
+    private function usesOnDemandDelivery(): bool
+    {
+        return $this->deliveryMode() === 'on_demand';
+    }
+
+    private function deliveryMode(): ?string
+    {
+        $mode = $this->config->get('smking.delivery.mode', 'legacy');
+
+        return in_array($mode, ['legacy', 'on_demand'], true) ? $mode : null;
+    }
+
+    private function onDemandPage(string $slug): CmsPage
+    {
+        $result = $this->onDemandRead('cms-page', 'slug:'.$slug);
+        if ($result?->snapshot !== null) {
+            return $this->pageFromPayload($result->snapshot->payload);
+        }
+
+        return $result?->httpStatus === 404
+            || in_array($result?->error, ['access_denied', 'configuration', 'disabled', 'invalid_identifier'], true)
+                ? CmsPage::notFound()
+                : CmsPage::serverError();
+    }
+
+    private function targetedPage(string $slug): ?CmsPage
+    {
+        if ($this->delivery === null) {
+            return null;
+        }
+        try {
+            $result = $this->delivery->publication('cms-page', 'slug:'.$slug);
+        } catch (Throwable) {
+            return CmsPage::serverError();
+        }
+        if ($result === null) {
+            return null;
+        }
+        if ($result->snapshot !== null) {
+            return $this->pageFromPayload($result->snapshot->payload);
+        }
+        if ($result->error === 'target_pending' && $this->deliveryMode() === 'legacy') {
+            return $this->legacyCache?->peek($slug) ?? CmsPage::serverError();
+        }
+
+        return $result->httpStatus === 404
+            ? CmsPage::notFound()
+            : CmsPage::serverError();
+    }
+
+    private function onDemandRead(string $resource, string $identifier): ?DeliveryResult
+    {
+        if ($this->delivery === null || $this->deliveryBudget === null) {
+            return null;
+        }
+
+        try {
+            $budget = ($this->deliveryBudget)();
+            if (! $budget instanceof WaitBudget) {
+                return null;
+            }
+
+            return $this->delivery->read($resource, $identifier, $budget);
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     private function remember(string $slug, callable $resolver): CmsPage

@@ -6,7 +6,11 @@ namespace Smking\Laravel;
 
 /**
  * Public defaults that customers can spread into their config to opt into
- * the package's recommended baseline. Two const arrays:
+ * the package's recommended baseline. It contains one shared cache TTL
+ * plus two route-pattern arrays:
+ *
+ *   - NOT_FOUND_TTL_SECONDS — negative-cache fallback shared by cache
+ *     writes and SDK diagnostics when customer config omits the value.
  *
  *   - EXCEPT_PATTERNS — **technical** routes that every Laravel site has
  *     in the same place because the framework or a known package owns them
@@ -26,6 +30,9 @@ namespace Smking\Laravel;
  */
 final class Defaults
 {
+    /** Default negative-cache TTL shared by cache writes and SDK reports. */
+    public const NOT_FOUND_TTL_SECONDS = 60;
+
     /**
      * Path patterns that are safe defaults across **all** Laravel sites
      * because the framework or a known package registers them. Used as

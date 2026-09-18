@@ -1,0 +1,22 @@
+{
+    "name": "smking/isolated-laravel10-delivery-test",
+    "description": "Isolated compatibility tests, never a deployment project.",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "laravel/framework": "10.50.2",
+        "orchestra/testbench": "^8.0",
+        "phpunit/phpunit": "^10.5",
+        "smking/laravel": "*@dev"
+    },
+    "repositories": [
+        {"type": "path", "url": "../..", "options": {"symlink": true}}
+    ],
+    "autoload-dev": {
+        "psr-4": {"Smking\\Laravel\\Tests\\": "../../tests/"}
+    },
+    "config": {
+        "allow-plugins": false,
+        "audit": {"block-insecure": false}
+    }
+}

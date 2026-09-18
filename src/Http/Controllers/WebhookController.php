@@ -10,6 +10,9 @@ use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Psr\Log\LoggerInterface;
+use Smking\Laravel\Delivery\CmsDeliveryNotification;
+use Smking\Laravel\Delivery\LegacyCmsCache;
+use Smking\Laravel\Delivery\OnDemandDelivery;
 use Smking\Laravel\Support\AeoCacheInvalidator;
 
 /**
@@ -64,6 +67,9 @@ class WebhookController
         private readonly CacheFactory $cache,
         private readonly AeoCacheInvalidator $aeoCacheInvalidator,
         private readonly ?LoggerInterface $logger = null,
+        private readonly ?LegacyCmsCache $cmsCache = null,
+        private readonly ?OnDemandDelivery $delivery = null,
+        private readonly ?CmsDeliveryNotification $deliveryNotification = null,
     ) {
     }
 
@@ -90,6 +96,17 @@ class WebhookController
         $payload = json_decode($rawBody, true);
         if (! is_array($payload)) {
             return response()->json(['error' => 'invalid_payload'], 400);
+        }
+
+        // Versioned delivery retries must reach their idempotent target state;
+        // do not consume the legacy deliveryId dedup key before registration.
+        if (($payload['kind'] ?? null) === 'cms_delivery_v2') {
+            if ($this->deliveryNotification === null) {
+                return response()->json(['ok' => false, 'error' => 'notifications_unavailable'], 503)
+                    ->header('Cache-Control', 'no-store');
+            }
+
+            return $this->deliveryNotification->receive($payload, strlen($rawBody));
         }
 
         // Replay protection — freshness window first (missing field counts
@@ -142,7 +159,13 @@ class WebhookController
         switch ($kind) {
             case 'cms_page':
                 foreach ($slugs as $slug) {
-                    $this->evictCmsCache($slug);
+                    $legacy = $this->cmsCache?->invalidate($slug) ?? $this->evictCmsCache($slug);
+                    $hasNewState = $this->delivery?->hasState('cms-page', 'slug:'.$slug) ?? false;
+                    if (! $legacy
+                        || ($hasNewState && ! ($this->delivery?->invalidate('cms-page', 'slug:'.$slug) ?? false))
+                    ) {
+                        return response()->json(['error' => 'cms_cache_unavailable'], 503);
+                    }
                     $evicted++;
                 }
                 $this->logger?->info('smking: CMS cache evicted via webhook', [
@@ -152,6 +175,15 @@ class WebhookController
 
             case 'aeo':
                 $canonicalPaths = $this->aeoCacheInvalidator->purgePaths($paths);
+                foreach ($canonicalPaths as $path) {
+                    foreach (['aeo', 'markdown'] as $resource) {
+                        $identifier = 'path:'.$path;
+                        $hasNewState = $this->delivery?->hasState($resource, $identifier) ?? false;
+                        if ($hasNewState && ! ($this->delivery?->invalidate($resource, $identifier) ?? false)) {
+                            return response()->json(['error' => 'aeo_cache_unavailable'], 503);
+                        }
+                    }
+                }
                 $evicted = count($canonicalPaths);
                 $this->logger?->info('smking: AEO cache evicted via webhook', [
                     'paths' => $canonicalPaths,
@@ -210,7 +242,7 @@ class WebhookController
      * the controller pure — no upstream call risk inside webhook
      * handler, just a local cache forget.
      */
-    private function evictCmsCache(string $slug): void
+    private function evictCmsCache(string $slug): bool
     {
         $cacheConfig = $this->config->get('smking.cache', []);
         $store = $cacheConfig['store'] ?? null;
@@ -226,5 +258,7 @@ class WebhookController
 
         $cacheKey = ($cacheConfig['cms_prefix'] ?? 'smking:cms:').$namespace.':'.$slug;
         $repository->forget($cacheKey);
+
+        return $repository->get($cacheKey) === null;
     }
 }

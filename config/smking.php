@@ -29,6 +29,35 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | On-demand delivery
+    |--------------------------------------------------------------------------
+    |
+    | The new v2 read path is opt-in. Existing installations stay on the
+    | legacy clients unless SMKING_DELIVERY_MODE is explicitly set to
+    | "on_demand". AEO can be paused independently without hiding CMS pages.
+    |
+    */
+    'delivery' => [
+        'mode' => env('SMKING_DELIVERY_MODE', 'legacy'),
+        'aeo_enabled' => env('SMKING_DELIVERY_AEO_ENABLED', true),
+        'cache_format' => 1,
+        'page_budget_ms' => env('SMKING_DELIVERY_PAGE_BUDGET_MS', 500),
+        'capacity' => env('SMKING_DELIVERY_CAPACITY', 1),
+        'lease_seconds' => env('SMKING_DELIVERY_LEASE_SECONDS', 15),
+        'circuit_seconds' => env('SMKING_DELIVERY_CIRCUIT_SECONDS', 30),
+        'connect_timeout' => env('SMKING_DELIVERY_CONNECT_TIMEOUT', 0.5),
+        'work_items' => env('SMKING_DELIVERY_WORK_ITEMS', 100),
+        'work_max_jobs' => env('SMKING_DELIVERY_WORK_MAX_JOBS', 10),
+        'work_budget_ms' => env('SMKING_DELIVERY_WORK_BUDGET_MS', 5000),
+        'heartbeat_seconds' => env('SMKING_DELIVERY_HEARTBEAT_SECONDS', 180),
+        // Versioned CMS targets stay off until SaaS delivery and the exact
+        // deployment scope have both been prepared. Keep enabled on rollback.
+        'notifications_enabled' => env('SMKING_DELIVERY_NOTIFICATIONS_ENABLED', false),
+        'notifications_scope' => env('SMKING_DELIVERY_NOTIFICATIONS_SCOPE'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Webhook (v0.11.0+ — push-invalidate customer cache on SaaS publish)
     |--------------------------------------------------------------------------
     |
@@ -239,7 +268,7 @@ return [
         // who want a longer miss cushion (worker-pool stampede protection
         // is already covered by `pending_ttl` + `circuit_breaker`) can
         // set `SMKING_NOT_FOUND_TTL` to a higher value.
-        'not_found_ttl' => env('SMKING_NOT_FOUND_TTL', 60),
+        'not_found_ttl' => env('SMKING_NOT_FOUND_TTL', Defaults::NOT_FOUND_TTL_SECONDS),
 
         // 5xx / DNS / TCP / read timeout — long TTL since SaaS is broken.
         // v0.10.0: adaptive backoff replaces flat 24hr — see
