@@ -11,6 +11,7 @@ use Illuminate\Foundation\Http\Kernel as FoundationKernel;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use ReflectionClass;
 use ReflectionException;
+use Smking\Laravel\Delivery\DeliveryReconciliation;
 use Smking\Laravel\Http\Middleware\InjectAeo;
 use Throwable;
 
@@ -29,7 +30,7 @@ class DoctorCommand extends Command
 
     protected $description = 'Verify smking SDK install + connectivity';
 
-    public function handle(Application $app, HttpFactory $http): int
+    public function handle(Application $app, HttpFactory $http, DeliveryReconciliation $reconciliation): int
     {
         $checks = [
             $this->checkConfigPublished($app),
@@ -37,6 +38,7 @@ class DoctorCommand extends Command
             $this->checkApiKey(),
             $this->checkBaseUrl(),
             $this->checkMiddlewareInKernel($app),
+            $this->checkDeliveryReconciliation($reconciliation),
             $this->checkApiReachable($http),
         ];
 
@@ -248,6 +250,43 @@ class DoctorCommand extends Command
         }
 
         return ['status' => 'pass', 'label' => 'SMKING_BASE_URL set', 'detail' => $url];
+    }
+
+    /**
+     * @return array{status: 'pass'|'fail'|'info', label: string, detail: string}
+     */
+    private function checkDeliveryReconciliation(DeliveryReconciliation $reconciliation): array
+    {
+        if (config('smking.delivery.mode', 'legacy') !== 'on_demand') {
+            return ['status' => 'info', 'label' => 'Daily delivery reconciliation', 'detail' => 'not required while delivery mode is legacy'];
+        }
+        $status = $reconciliation->status();
+        if ($status['error'] === 'registry_full') {
+            return ['status' => 'info', 'label' => 'Daily delivery reconciliation', 'detail' => sprintf(
+                'local registry reached its %d-item limit; raise SMKING_DELIVERY_RECONCILE_ITEMS before relying on daily freshness checks',
+                $status['known'],
+            )];
+        }
+        if ($status['error'] !== null) {
+            return ['status' => 'info', 'label' => 'Daily delivery reconciliation', 'detail' => 'local state unavailable; use a shared File or Redis cache and verify `php artisan schedule:run`'];
+        }
+        if ($status['last_run_at'] === null) {
+            return ['status' => 'info', 'label' => 'Daily delivery reconciliation', 'detail' => sprintf(
+                'scheduler run not observed; verify Laravel scheduler executes every minute (site check runs at 03:%02d in app timezone)',
+                $status['scheduled_minute'],
+            )];
+        }
+
+        $age = (int) floor(microtime(true) * 1000) - $status['last_run_at'];
+        if ($age > 36 * 3_600_000) {
+            return ['status' => 'info', 'label' => 'Daily delivery reconciliation', 'detail' => 'last scheduler run is older than 36 hours; verify `php artisan schedule:run`'];
+        }
+
+        return ['status' => 'pass', 'label' => 'Daily delivery reconciliation', 'detail' => sprintf(
+            'last run observed; %d known item(s), daily check runs at 03:%02d',
+            $status['known'],
+            $status['scheduled_minute'],
+        )];
     }
 
     /**

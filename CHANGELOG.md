@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Keep the last successfully validated v2 Blog, AEO, Markdown, and site-file
+  content readable while its local cache record exists; source freshness no
+  longer doubles as a content-deletion deadline.
+- Stop stale visitor reads from scheduling repeated origin refreshes.
+
+### Added
+- Register a bounded daily reconciliation command for installations that use
+  `on_demand` delivery. Known successful identifiers are checked once per local
+  calendar day at a site-specific minute during 03:00–03:59; failures preserve
+  the last good body. A valid versioned CMS notification replaces only the CMS
+  page check, while AEO, Markdown, and site files keep their daily fallback.
+- Backfill pre-existing successful cache entries into daily reconciliation on
+  their next local read, without an origin request.
+- Report missing or stale Laravel scheduler activity and registry overflow
+  through `smking:doctor`.
+
+The package only defines this Laravel schedule. It does not install or start
+the host's cron entry or scheduler process.
+
 ## v0.22.0 — Opt-in on-demand delivery (2026-09-18)
 
 This release makes the Laravel delivery client available for isolated testing;

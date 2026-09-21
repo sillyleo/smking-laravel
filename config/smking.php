@@ -49,6 +49,7 @@ return [
         'work_items' => env('SMKING_DELIVERY_WORK_ITEMS', 100),
         'work_max_jobs' => env('SMKING_DELIVERY_WORK_MAX_JOBS', 10),
         'work_budget_ms' => env('SMKING_DELIVERY_WORK_BUDGET_MS', 5000),
+        'reconcile_items' => env('SMKING_DELIVERY_RECONCILE_ITEMS', 500),
         'heartbeat_seconds' => env('SMKING_DELIVERY_HEARTBEAT_SECONDS', 180),
         // Versioned CMS targets stay off until SaaS delivery and the exact
         // deployment scope have both been prepared. Keep enabled on rollback.

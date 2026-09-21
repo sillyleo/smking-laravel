@@ -42,6 +42,7 @@ final class OnDemandDelivery
         private readonly ?DeliveryReportOutbox $reports = null,
         private readonly ?DeliveryTargetState $targets = null,
         ?DeliveryCapacity $capacity = null,
+        private readonly ?DeliveryReconciliation $reconciliation = null,
     ) {
         $this->clock = $clock ?? static fn (): int => (int) floor(microtime(true) * 1000);
         $this->capacity = $capacity ?? new DeliveryCapacity($cache, $config);
@@ -51,8 +52,6 @@ final class OnDemandDelivery
     {
         $cached = $this->peek($resource, $identifier);
         if ($cached->snapshot !== null) {
-            $this->scheduleBackground($resource, $identifier, $cached);
-
             return $cached;
         }
         if (in_array($cached->error, [
@@ -176,7 +175,7 @@ final class OnDemandDelivery
                         $state = $this->state($resource, $identifier) ?? $this->emptyState($resource, $identifier);
                         $state['generation'] = $generation;
 
-                        return $this->put($this->stateKey($resource, $identifier), $state);
+                        return $this->putState($resource, $identifier, $state);
                     });
                 });
                 if ($prepared !== true) {
@@ -221,9 +220,14 @@ final class OnDemandDelivery
         }
 
         try {
-            return $this->withLock($this->stateKey($resource, $identifier), function () use ($resource, $identifier): bool {
-                return $this->put($this->stateKey($resource, $identifier), $this->emptyState($resource, $identifier));
+            $invalidated = $this->withLock($this->stateKey($resource, $identifier), function () use ($resource, $identifier): bool {
+                return $this->putState($resource, $identifier, $this->emptyState($resource, $identifier));
             }) === true;
+            if ($invalidated) {
+                $this->reconciliation?->forget($resource, $identifier);
+            }
+
+            return $invalidated;
         } catch (Throwable) {
             return false;
         }
@@ -246,6 +250,10 @@ final class OnDemandDelivery
                 $this->cacheFormat,
             );
             if ($snapshot !== null) {
+                if ($status === 200) {
+                    $this->reconciliation?->remember($snapshot);
+                }
+
                 return new DeliveryResult(
                     snapshot: $snapshot,
                     httpStatus: $status,
@@ -368,7 +376,7 @@ final class OnDemandDelivery
                 $missing = $result->httpStatus === 404;
                 $state['success'] = $missing ? null : $result->snapshot->toCache($this->cacheFormat);
                 $state['missing'] = $missing ? $result->snapshot->toCache($this->cacheFormat) : null;
-                if (! $this->put($this->stateKey($resource, $identifier), $state)) {
+                if (! $this->putState($resource, $identifier, $state)) {
                     return 'cache_unavailable';
                 }
                 $this->writeControl($resource, denied: false, status: null, circuitUntil: 0);
@@ -377,9 +385,17 @@ final class OnDemandDelivery
             });
         });
 
-        return $committed === 'committed'
-            ? $result
-            : new DeliveryResult(error: $committed === false
+        if ($committed === 'committed') {
+            if ($result->httpStatus === 200) {
+                $this->reconciliation?->remember($result->snapshot);
+            } elseif ($result->httpStatus === 404) {
+                $this->reconciliation?->forget($resource, $identifier);
+            }
+
+            return $result;
+        }
+
+        return new DeliveryResult(error: $committed === false
                 ? 'superseded'
                 : (is_string($committed) ? $committed : 'cache_busy'));
     }
@@ -736,6 +752,15 @@ final class OnDemandDelivery
     private function put(string $key, array $value): bool
     {
         return $this->cache->put($key, $value, self::RETENTION_SECONDS) === true;
+    }
+
+    private function putState(string $resource, string $identifier, array $state): bool
+    {
+        $key = $this->stateKey($resource, $identifier);
+
+        return is_array($state['success'] ?? null)
+            ? $this->cache->forever($key, $state) === true
+            : $this->put($key, $state);
     }
 
     private function rootKey(): string

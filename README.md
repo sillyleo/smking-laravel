@@ -340,6 +340,20 @@ background work, independent reporting, prewarm, and rollback checks are for
 an explicitly prepared isolated rollout; they are not a production enablement
 instruction.
 
+The unreleased source after v0.22.0 registers a bounded
+`smking:delivery:reconcile` task in Laravel's schedule. It remains a no-op in
+`legacy` mode. In `on_demand` mode it checks only previously successful local
+identifiers once per day, at a site-specific minute between 03:00 and 03:59 in
+`app.timezone`; failed checks keep the last good content. A valid versioned CMS
+notification setup replaces this daily check only for CMS pages. AEO, Markdown,
+and public site files continue their daily fallback because the CMS notification
+contract does not cover them. Successful cache entries created before this
+reconciliation was installed join the registry when they are next read, without
+making a visitor-time origin request. The package does not start the host
+scheduler. The server must still run Laravel's scheduler every minute, and
+`php artisan smking:doctor` reports missing scheduler activity or a full local
+registry.
+
 Keep the customer site's `composer.lock` unchanged until that site is ready to
 test this version. SaaS migrations, delivery flags, CDN behavior, and the
 customer's worker and rollback procedure need separate validation before

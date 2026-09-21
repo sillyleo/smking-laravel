@@ -6,6 +6,7 @@ namespace Smking\Laravel\Tests\Console;
 
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
+use Smking\Laravel\Delivery\DeliveryReconciliation;
 use Smking\Laravel\Tests\TestCase;
 
 class DoctorCommandTest extends TestCase
@@ -194,6 +195,32 @@ class DoctorCommandTest extends TestCase
         \Illuminate\Support\Facades\Artisan::call('smking:doctor', [], $output);
 
         $this->assertStringContainsString('drift check skipped', $output->fetch());
+    }
+
+    public function test_doctor_warns_when_daily_reconciliation_scheduler_has_not_run(): void
+    {
+        $directory = sys_get_temp_dir().'/smking-doctor-reconciliation-'.bin2hex(random_bytes(8));
+        @mkdir($directory, 0700, true);
+        config()->set('cache.stores.delivery_doctor', ['driver' => 'file', 'path' => $directory]);
+        config()->set('smking.cache.enabled', true);
+        config()->set('smking.cache.store', 'delivery_doctor');
+        config()->set('smking.delivery.mode', 'on_demand');
+        config()->set('smking.delivery.notifications_enabled', false);
+        $this->app->forgetInstance(DeliveryReconciliation::class);
+        Http::fake([
+            'api.test/api/v1/public/aeo' => Http::response([], 400),
+        ]);
+
+        try {
+            $output = new \Symfony\Component\Console\Output\BufferedOutput();
+            \Illuminate\Support\Facades\Artisan::call('smking:doctor', [], $output);
+            $display = $output->fetch();
+
+            $this->assertStringContainsString('Daily delivery reconciliation', $display);
+            $this->assertStringContainsString('scheduler run not observed', $display);
+        } finally {
+            (new \Illuminate\Filesystem\Filesystem())->deleteDirectory($directory);
+        }
     }
 
     // v0.8.0: removed 3 takeover tests (test_doctor_reports_takeover_flag_state_per_file,

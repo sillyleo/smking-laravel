@@ -6,6 +6,7 @@ namespace Smking\Laravel;
 
 use Illuminate\Contracts\Foundation\CachesConfiguration;
 use Illuminate\Contracts\Http\Kernel as HttpKernel;
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Http\Kernel as FoundationKernel;
 use Illuminate\Support\ServiceProvider;
 use ReflectionClass;
@@ -14,6 +15,7 @@ use Smking\Laravel\Console\CachePurgeCommand;
 use Smking\Laravel\Console\CircuitStatusCommand;
 use Smking\Laravel\Console\DoctorCommand;
 use Smking\Laravel\Console\DeliveryPrewarmCommand;
+use Smking\Laravel\Console\DeliveryReconcileCommand;
 use Smking\Laravel\Console\DeliveryReportCommand;
 use Smking\Laravel\Console\DeliveryWorkCommand;
 use Smking\Laravel\Console\InstallCommand;
@@ -23,6 +25,7 @@ use Smking\Laravel\Delivery\DeliveryCapacity;
 use Smking\Laravel\Delivery\DeliverySnapshot;
 use Smking\Laravel\Delivery\DeliveryReportOutbox;
 use Smking\Laravel\Delivery\DeliveryReportTransport;
+use Smking\Laravel\Delivery\DeliveryReconciliation;
 use Smking\Laravel\Delivery\DeliveryTargetState;
 use Smking\Laravel\Delivery\DeliveryWorklist;
 use Smking\Laravel\Delivery\LegacyCmsCache;
@@ -113,6 +116,16 @@ class SmkingServiceProvider extends ServiceProvider
             );
         });
 
+        $this->app->singleton(DeliveryReconciliation::class, function ($app) use ($deliveryCache, $deliveryInteger): DeliveryReconciliation {
+            $config = $app->make(\Illuminate\Contracts\Config\Repository::class);
+
+            return new DeliveryReconciliation(
+                cache: $deliveryCache($app),
+                config: $config,
+                maxItems: $deliveryInteger($config, 'reconcile_items', 500),
+            );
+        });
+
         $this->app->singleton(OnDemandDelivery::class, function ($app) use ($deliveryCache): OnDemandDelivery {
             $config = $app->make(\Illuminate\Contracts\Config\Repository::class);
             $format = $config->get('smking.delivery.cache_format', DeliverySnapshot::CACHE_FORMAT);
@@ -131,6 +144,7 @@ class SmkingServiceProvider extends ServiceProvider
                 reports: $app->make(DeliveryReportOutbox::class),
                 targets: $app->make(DeliveryTargetState::class),
                 capacity: $app->make(DeliveryCapacity::class),
+                reconciliation: $app->make(DeliveryReconciliation::class),
             );
         });
 
@@ -256,6 +270,7 @@ class SmkingServiceProvider extends ServiceProvider
             $this->commands([
                 DoctorCommand::class,
                 DeliveryPrewarmCommand::class,
+                DeliveryReconcileCommand::class,
                 DeliveryReportCommand::class,
                 DeliveryWorkCommand::class,
                 CachePurgeCommand::class,
@@ -263,6 +278,15 @@ class SmkingServiceProvider extends ServiceProvider
                 InstallCommand::class,
                 PublishRobotsTxtCommand::class,
             ]);
+
+            $this->callAfterResolving(Schedule::class, function (Schedule $schedule): void {
+                $timezone = $this->app['config']->get('app.timezone', 'UTC');
+                $minute = $this->app->make(DeliveryReconciliation::class)->scheduledMinute();
+                $schedule->command(DeliveryReconcileCommand::class)
+                    ->cron($minute.' 3 * * *')
+                    ->timezone(is_string($timezone) && $timezone !== '' ? $timezone : 'UTC')
+                    ->withoutOverlapping(10);
+            });
         }
     }
 

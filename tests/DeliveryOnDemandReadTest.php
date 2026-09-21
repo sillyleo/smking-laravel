@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace Smking\Laravel\Tests;
 
+use Carbon\CarbonImmutable;
 use Illuminate\Cache\FileStore;
 use Illuminate\Cache\Repository;
 use Illuminate\Filesystem\Filesystem;
 use Illuminate\Support\Facades\Http;
 use Smking\Laravel\Data\CmsPage;
+use Smking\Laravel\Delivery\DeliveryWorklist;
 use Smking\Laravel\Delivery\OnDemandDelivery;
 use Smking\Laravel\Delivery\WaitBudget;
 
@@ -95,6 +97,91 @@ class DeliveryOnDemandReadTest extends TestCase
         $blocked = $delivery->read('cms-page', 'slug:other', new WaitBudget(500));
         $this->assertSame('backoff', $blocked->error);
         Http::assertSentCount(2);
+    }
+
+    public function test_successful_content_remains_readable_after_a_day_without_visitor_network_requests(): void
+    {
+        Http::fake([
+            '*cms-page*' => Http::sequence()
+                ->push($this->cmsPayload('article', 'Stable CMS'), 200, ['Content-Type' => 'application/json'])
+                ->push('unavailable', 503, ['Content-Type' => 'text/plain']),
+            '*aeo*' => Http::response(
+                $this->aeoPayload('/products/article'),
+                200,
+                ['Content-Type' => 'application/json'],
+            ),
+        ]);
+
+        $delivery = $this->delivery();
+        $this->assertSame(
+            'Stable CMS',
+            $delivery->read('cms-page', 'slug:article', new WaitBudget(500))->snapshot?->payload['page']['title'],
+        );
+        $this->assertSame(
+            'Ready',
+            $delivery->refresh('aeo', 'path:/products/article', new WaitBudget(500))->snapshot?->payload['summary'],
+        );
+        Http::assertSentCount(2);
+
+        $this->now += 86_400_000;
+
+        $this->assertSame(
+            'Stable CMS',
+            $delivery->read('cms-page', 'slug:article', new WaitBudget(500))->snapshot?->payload['page']['title'],
+        );
+        $this->assertSame(
+            'Ready',
+            $delivery->read('aeo', 'path:/products/article', new WaitBudget(500))->snapshot?->payload['summary'],
+        );
+        Http::assertSentCount(2);
+    }
+
+    public function test_stale_visitor_read_does_not_schedule_background_refresh(): void
+    {
+        Http::fake([
+            '*' => Http::response($this->cmsPayload('article', 'Stable body'), 200, ['Content-Type' => 'application/json']),
+        ]);
+        $worklist = new DeliveryWorklist(
+            cache: $this->cache,
+            config: config(),
+            clock: fn (): int => $this->now,
+            maxItems: 10,
+            heartbeatSeconds: 600,
+        );
+        $this->assertTrue($worklist->prepare());
+        $delivery = $this->delivery(worklist: $worklist);
+
+        $this->assertNotNull($delivery->read('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
+        $this->now += 300_000;
+
+        $this->assertNotNull($delivery->read('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
+        $this->assertSame(0, $worklist->status()['counts']['pending']);
+        Http::assertSentCount(1);
+    }
+
+    public function test_successful_content_is_not_physically_expired_by_the_sdk(): void
+    {
+        $wallClock = CarbonImmutable::create(2026, 9, 12, 0, 0, 0, 'UTC');
+        CarbonImmutable::setTestNow($wallClock);
+
+        try {
+            Http::fake([
+                '*' => Http::response($this->cmsPayload('article', 'Durable body'), 200, ['Content-Type' => 'application/json']),
+            ]);
+            $delivery = $this->delivery();
+            $this->assertNotNull($delivery->read('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
+
+            $this->now += 8 * 86_400_000;
+            CarbonImmutable::setTestNow($wallClock->addDays(8));
+
+            $this->assertSame(
+                'Durable body',
+                $delivery->peek('cms-page', 'slug:article')->snapshot?->payload['page']['title'],
+            );
+            Http::assertSentCount(1);
+        } finally {
+            CarbonImmutable::setTestNow();
+        }
     }
 
     public function test_multiple_cold_reads_share_one_fractional_wait_budget(): void
@@ -247,7 +334,7 @@ class DeliveryOnDemandReadTest extends TestCase
         Http::assertNothingSent();
     }
 
-    private function delivery(int $cacheFormat = 1): OnDemandDelivery
+    private function delivery(int $cacheFormat = 1, ?DeliveryWorklist $worklist = null): OnDemandDelivery
     {
         return new OnDemandDelivery(
             cache: $this->cache,
@@ -255,6 +342,7 @@ class DeliveryOnDemandReadTest extends TestCase
             config: config(),
             clock: fn (): int => $this->now,
             cacheFormat: $cacheFormat,
+            worklist: $worklist,
         );
     }
 
