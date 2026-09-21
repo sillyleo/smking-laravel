@@ -20,12 +20,16 @@ final class DeliveryTargetState
 
     private readonly Closure $clock;
 
+    private readonly DeliveryLocalStore $local;
+
     public function __construct(
         private readonly CacheRepository $cache,
         private readonly ConfigRepository $config,
         ?Closure $clock = null,
+        ?DeliveryLocalStore $local = null,
     ) {
         $this->clock = $clock ?? static fn (): int => (int) floor(microtime(true) * 1000);
+        $this->local = $local ?? new DeliveryLocalStore((string) $config->get('smking.delivery.local_store_path', storage_path('app/smking-delivery')));
     }
 
     public function enabled(): bool
@@ -53,14 +57,32 @@ final class DeliveryTargetState
     /** @return array{format:int,token:string,target:array<string,mixed>,updated_at:int}|null */
     public function read(string $identifier): ?array
     {
-        if (! $this->enabled()) {
-            return null;
-        }
-        if (! $this->available() || DeliveryIdentifier::parameters('cms-page', $identifier) === null) {
+        // The receiving toggle must not erase a previously accepted fence.
+        if (DeliveryIdentifier::parameters('cms-page', $identifier) === null) {
             throw new RuntimeException('delivery_target_unavailable');
         }
 
-        $record = $this->cache->get($this->key($identifier));
+        $record = $this->local->read($this->key($identifier));
+        return $this->validateRecord($identifier, $record);
+    }
+
+    /** Explicit upgrade only: retain an existing durable fence, never overwrite it. */
+    public function importCached(string $identifier): bool
+    {
+        if (DeliveryIdentifier::parameters('cms-page', $identifier) === null) {
+            return false;
+        }
+        return $this->locked($identifier, function () use ($identifier): bool {
+            if ($this->local->read($this->key($identifier)) !== null) {
+                return true;
+            }
+            $record = $this->validateRecord($identifier, $this->cache->get($this->key($identifier)));
+            return $record === null || $this->local->write($this->key($identifier), $record);
+        }) === true;
+    }
+
+    private function validateRecord(string $identifier, mixed $record): ?array
+    {
         if ($record === null) {
             return null;
         }
@@ -120,7 +142,7 @@ final class DeliveryTargetState
                     'target' => $target,
                     'updated_at' => ($this->clock)(),
                 ];
-                if ($this->cache->forever($this->key($target['identifier']), $record) !== true) {
+                if ($this->local->write($this->key($target['identifier']), $record) !== true) {
                     throw new RuntimeException('delivery_target_write_failed');
                 }
 
@@ -142,10 +164,7 @@ final class DeliveryTargetState
      */
     public function guard(string $identifier, ?string $expectedToken, callable $operation): mixed
     {
-        if (! $this->enabled()) {
-            return $operation();
-        }
-        if (! $this->available()) {
+        if (DeliveryIdentifier::parameters('cms-page', $identifier) === null) {
             throw new RuntimeException('delivery_target_unavailable');
         }
 
@@ -221,14 +240,6 @@ final class DeliveryTargetState
 
     private function locked(string $identifier, callable $operation): mixed
     {
-        $lock = $this->cache->lock($this->key($identifier).':mutex', 5);
-        if (! $lock->get()) {
-            return null;
-        }
-        try {
-            return $operation();
-        } finally {
-            $lock->release();
-        }
+        return $this->local->locked($this->key($identifier), $operation);
     }
 }

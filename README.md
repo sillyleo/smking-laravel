@@ -340,19 +340,20 @@ background work, independent reporting, prewarm, and rollback checks are for
 an explicitly prepared isolated rollout; they are not a production enablement
 instruction.
 
-The unreleased source after v0.22.0 registers a bounded
-`smking:delivery:reconcile` task in Laravel's schedule. It remains a no-op in
-`legacy` mode. In `on_demand` mode it checks only previously successful local
-identifiers once per day, at a site-specific minute between 03:00 and 03:59 in
-`app.timezone`; failed checks keep the last good content. A valid versioned CMS
-notification setup replaces this daily check only for CMS pages. AEO, Markdown,
-and public site files continue their daily fallback because the CMS notification
-contract does not cover them. Successful cache entries created before this
-reconciliation was installed join the registry when they are next read, without
-making a visitor-time origin request. The package does not start the host
-scheduler. The server must still run Laravel's scheduler every minute, and
-`php artisan smking:doctor` reports missing scheduler activity or a full local
-registry.
+### 尚未發布：本地持久副本候選
+
+目前分支正在依[現行計劃與驗收](../../docs/research/sdk-on-demand-delivery-recovery-2026-09-14.md#local-copy-policy)分段改造，不是新版已完成或啟用指示。L1 將 v2 本文、下載代次、權限及 CMS 撤回紀錄保存為私有版本化 JSON，預設位於 `storage/app/smking-delivery`，可用 `SMKING_DELIVERY_LOCAL_STORE_PATH` 指定單機部署間共用的持久目錄。一般 `cache:clear` 不再清除這些資料；此目錄不得放在 public 或一般 cache 目錄，也不得隨部署移除。來源／金鑰／格式隔離仍保留，檔案損毀會明確失敗，不自動改讀舊 cache。
+
+舊 v2 cache 不由訪客自動遷入。保持 `legacy` 模式、停止舊版本寫入者並保留完整現行 cache 後，可對明確已知識別執行有界、本地匯入：
+
+```bash
+php artisan smking:delivery:import --resource=cms-page --identifier=slug:article
+php artisan smking:delivery:import --resource=aeo --identifier=path:/products/article
+```
+
+同一命令最多 20 筆、10 秒批次預算；不掃全庫、不呼叫來源、不改模式或舊 cache。只接受既有 v2 格式，不匯入舊 PHP SDK 物件；缺頁、失效或無法證明就緒時應重新預熱並核對，不能直接切換。移入權限及撤回後才移入本文，既有持久狀態不被舊 cache 覆蓋。完整持久目錄若從舊備份還原，必須重新核對來源／撤回及就緒狀態後才公開，不能假設舊備份仍獲授權。
+
+L2 的四類通知一致性、L3 的完整每日巡檢及 L4 的首次準備／所有訪客零下載仍未完成。現有每日任務只在站台分鐘啟動單批、僅 CMS 通知略過後備，不能當成最終契約；既有冷頁分支仍可能取得內容。套件不啟動主機 scheduler，客戶仍須自行執行 Laravel scheduler 與背景 worker。正式使用前須完成上述切片及真實主機驗收。
 
 Keep the customer site's `composer.lock` unchanged until that site is ready to
 test this version. SaaS migrations, delivery flags, CDN behavior, and the

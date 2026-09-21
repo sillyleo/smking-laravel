@@ -14,6 +14,7 @@ use ReflectionException;
 use Smking\Laravel\Console\CachePurgeCommand;
 use Smking\Laravel\Console\CircuitStatusCommand;
 use Smking\Laravel\Console\DoctorCommand;
+use Smking\Laravel\Console\DeliveryImportCommand;
 use Smking\Laravel\Console\DeliveryPrewarmCommand;
 use Smking\Laravel\Console\DeliveryReconcileCommand;
 use Smking\Laravel\Console\DeliveryReportCommand;
@@ -269,6 +270,7 @@ class SmkingServiceProvider extends ServiceProvider
         if ($this->app->runningInConsole()) {
             $this->commands([
                 DoctorCommand::class,
+                DeliveryImportCommand::class,
                 DeliveryPrewarmCommand::class,
                 DeliveryReconcileCommand::class,
                 DeliveryReportCommand::class,
