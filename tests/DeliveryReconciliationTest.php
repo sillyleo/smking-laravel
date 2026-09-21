@@ -65,7 +65,7 @@ class DeliveryReconciliationTest extends TestCase
 
         $reconciliation = $this->reconciliation();
         $delivery = $this->delivery($reconciliation);
-        $this->assertSame('CMS 1', $delivery->read('cms-page', 'slug:article', new WaitBudget(500))->snapshot?->payload['page']['title']);
+        $this->assertSame('CMS 1', $delivery->refresh('cms-page', 'slug:article', new WaitBudget(500))->snapshot?->payload['page']['title']);
         $this->assertSame('AEO 1', $delivery->refresh('aeo', 'path:/products/article', new WaitBudget(500))->snapshot?->payload['summary']);
         Http::assertSentCount(2);
 
@@ -115,7 +115,7 @@ class DeliveryReconciliationTest extends TestCase
 
         $reconciliation = $this->reconciliation();
         $delivery = $this->delivery($reconciliation);
-        $this->assertNotNull($delivery->read('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
+        $this->assertNotNull($delivery->refresh('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
         $this->assertNotNull($delivery->refresh('aeo', 'path:/products/article', new WaitBudget(500))->snapshot);
 
         config()->set('smking.delivery.notifications_enabled', true);
@@ -179,7 +179,7 @@ class DeliveryReconciliationTest extends TestCase
             ['Content-Type' => 'application/json'],
         ));
 
-        $this->assertNotNull($this->delivery()->read(
+        $this->assertNotNull($this->delivery()->refresh(
             'cms-page',
             'slug:article',
             new WaitBudget(500),
@@ -232,7 +232,7 @@ class DeliveryReconciliationTest extends TestCase
         ));
         $reconciliation = $this->reconciliation();
         $delivery = $this->delivery($reconciliation);
-        $this->assertNotNull($delivery->read('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
+        $this->assertNotNull($delivery->refresh('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
 
         config()->set('smking.delivery.notifications_enabled', true);
         config()->set('smking.delivery.notifications_scope', null);

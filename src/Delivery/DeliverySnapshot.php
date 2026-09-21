@@ -111,17 +111,17 @@ final class DeliverySnapshot
         $status = is_array($payload) ? ($payload['status'] ?? null) : null;
         $httpStatus = $status === 'not_found' ? 404 : 200;
 
-        // The origin freshness window controls revalidation, not the lifetime
-        // of a last-known-good body. Missing records remain short-lived so a
-        // newly published resource can become visible promptly.
+        // The origin freshness window controls background revalidation, not
+        // the lifetime of a validated local result. Both content and a
+        // confirmed missing result remain authoritative until preparation,
+        // reconciliation, or a notification replaces them; visitors never
+        // refresh either state.
         $validationNow = $nowMs;
-        if ($status === 'ready') {
-            $usableUntil = self::timestamp(is_array($payload['delivery'] ?? null)
-                ? ($payload['delivery']['usable_until'] ?? null)
-                : null);
-            if ($usableUntil !== null && $usableUntil <= $nowMs) {
-                $validationNow = $usableUntil - 1;
-            }
+        $usableUntil = self::timestamp(is_array($payload['delivery'] ?? null)
+            ? ($payload['delivery']['usable_until'] ?? null)
+            : null);
+        if ($usableUntil !== null && $usableUntil <= $nowMs) {
+            $validationNow = $usableUntil - 1;
         }
 
         return self::fromResponse($resource, $identifier, $httpStatus, $payload, $validationNow);

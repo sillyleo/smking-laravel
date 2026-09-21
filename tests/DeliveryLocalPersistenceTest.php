@@ -9,6 +9,7 @@ use Illuminate\Cache\Repository;
 use Illuminate\Filesystem\Filesystem;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Support\Facades\Http;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Smking\Laravel\Delivery\DeliveryTargetState;
 use Smking\Laravel\Delivery\DeliverySnapshot;
 use Smking\Laravel\Delivery\OnDemandDelivery;
@@ -61,6 +62,38 @@ class DeliveryLocalPersistenceTest extends TestCase
         Http::assertSentCount(4);
     }
 
+    #[DataProvider('contentResources')]
+    public function test_valid_missing_state_survives_cache_flush_and_time(string $resource, string $identifier): void
+    {
+        Http::fake(fn () => Http::response(
+            $this->missingPayload($resource),
+            404,
+            ['Content-Type' => 'application/json'],
+        ));
+
+        $delivery = $this->delivery();
+        $first = $delivery->refresh($resource, $identifier, new WaitBudget(500));
+        $this->assertSame(404, $first->httpStatus);
+        $this->assertSame('not_found', $first->snapshot?->payload['status']);
+
+        $this->assertTrue($this->cache->flush());
+        $this->now += 31 * 86_400_000;
+        $persisted = $this->delivery()->peek($resource, $identifier);
+        $this->assertSame(404, $persisted->httpStatus, $resource.': '.$persisted->error);
+        $this->assertSame('not_found', $persisted->snapshot?->payload['status']);
+        Http::assertSentCount(1);
+    }
+
+    public static function contentResources(): array
+    {
+        return [
+            ['cms-page', 'slug:article'],
+            ['aeo', 'path:/article'],
+            ['markdown', 'path:/article'],
+            ['site-file', 'kind:sitemap'],
+        ];
+    }
+
     public function test_withdrawal_and_version_fence_survive_cache_flush(): void
     {
         config()->set('smking.delivery.notifications_enabled', true);
@@ -89,12 +122,52 @@ class DeliveryLocalPersistenceTest extends TestCase
     {
         Http::fake(['*' => Http::sequence()
             ->push($this->payload('cms-page'), 200, ['Content-Type' => 'application/json'])
-            ->push([], 401, ['Content-Type' => 'application/json'])]);
+            ->push(['status' => 'unavailable', 'error' => 'invalid_key'], 401, ['Content-Type' => 'application/json'])]);
         $this->assertNotNull($this->delivery()->refresh('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
         $this->assertSame('access_denied', $this->delivery()->refresh('aeo', 'path:/article', new WaitBudget(500))->error);
         $this->cache->flush();
         $this->assertSame('access_denied', $this->delivery()->peek('cms-page', 'slug:article')->error);
         Http::assertSentCount(2);
+    }
+
+    #[DataProvider('unverifiedDenials')]
+    public function test_unverified_denial_never_hides_persisted_content(
+        int $status,
+        string|array $body,
+        string $contentType,
+    ): void {
+        $requests = 0;
+        Http::fake(function () use (&$requests, $status, $body, $contentType) {
+            $requests++;
+
+            return $requests === 2
+                ? Http::response($body, $status, ['Content-Type' => $contentType])
+                : Http::response($this->payload('cms-page'), 200, ['Content-Type' => 'application/json']);
+        });
+
+        $delivery = $this->delivery();
+        $this->assertNotNull($delivery->refresh('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
+
+        $this->now += 400_000;
+        $blocked = $delivery->refresh('cms-page', 'slug:article', new WaitBudget(500));
+        $this->assertSame('upstream', $blocked->error);
+
+        $this->cache->flush();
+        $this->now += 31 * 86_400_000;
+        $this->assertSame('<main>Saved</main>', $delivery->peek('cms-page', 'slug:article')->snapshot?->payload['page']['bodyHtml']);
+        $recovered = $delivery->refresh('cms-page', 'slug:article', new WaitBudget(500));
+        $this->assertNotNull($recovered->snapshot, (string) $recovered->error);
+        Http::assertSentCount(3);
+    }
+
+    public static function unverifiedDenials(): array
+    {
+        return [
+            'proxy html 401' => [401, '<html><title>Proxy challenge</title></html>', 'text/html'],
+            'proxy html 403' => [403, '<html><title>Proxy challenge</title></html>', 'text/html'],
+            'incomplete json 401' => [401, ['status' => 'unavailable'], 'application/json'],
+            'incomplete json 403' => [403, ['status' => 'unavailable', 'error' => 'cms_disabled'], 'application/json'],
+        ];
     }
 
     public function test_failed_replacement_keeps_last_good_body(): void
@@ -244,6 +317,20 @@ class DeliveryLocalPersistenceTest extends TestCase
             'generation' => str_repeat('c', 32), 'success' => $snapshot->toCache(), 'missing' => null];
         $this->cache->forever($this->oldStateKey(), $state);
         return $state;
+    }
+
+    private function missingPayload(string $resource): array
+    {
+        $payload = $this->payload($resource);
+        $iso = static fn (int $milliseconds): string => gmdate('Y-m-d\TH:i:s', intdiv($milliseconds, 1000)).sprintf('.%03dZ', $milliseconds % 1000);
+
+        return [
+            'status' => 'not_found',
+            'delivery' => array_replace($payload['delivery'], [
+                'fresh_until' => $iso($this->now + 60_000),
+                'usable_until' => $iso($this->now + 60_000),
+            ]),
+        ];
     }
 
     private function oldStateKey(): string

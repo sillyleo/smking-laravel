@@ -1063,6 +1063,30 @@ class AeoClient
             : $publication;
     }
 
+    /**
+     * Distinguish a validated local absence from an unavailable local copy.
+     * Public controllers use this only after fetchPublicFile() returns null;
+     * the repeated delivery read is local-only and never schedules work.
+     *
+     * @param  'sitemap'|'robots'|'llms_txt'  $kind
+     */
+    public function isPublicFileConfirmedMissing(string $kind): bool
+    {
+        if (! in_array($kind, ['sitemap', 'robots', 'llms_txt'], true)
+            || $this->deliveryMode() === null
+            || $this->delivery === null
+        ) {
+            return false;
+        }
+
+        $result = $this->usesOnDemandDelivery()
+            ? $this->onDemandRead('site-file', 'kind:'.$kind)
+            : $this->delivery->publication('site-file', 'kind:'.$kind);
+
+        return $result?->httpStatus === 404
+            && in_array($result->error, [null, 'withdrawn'], true);
+    }
+
     private function publicFileResult(?DeliveryResult $result): ?array
     {
         $document = $result?->snapshot?->payload['document'] ?? null;
@@ -1189,17 +1213,12 @@ class AeoClient
 
     private function onDemandRead(string $resource, string $identifier): ?DeliveryResult
     {
-        if ($this->delivery === null || $this->deliveryBudget === null) {
+        if ($this->delivery === null) {
             return null;
         }
 
         try {
-            $budget = ($this->deliveryBudget)();
-            if (! $budget instanceof WaitBudget) {
-                return null;
-            }
-
-            return $this->delivery->read($resource, $identifier, $budget);
+            return $this->delivery->read($resource, $identifier);
         } catch (Throwable) {
             return null;
         }

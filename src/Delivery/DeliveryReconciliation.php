@@ -91,6 +91,20 @@ final class DeliveryReconciliation
         }
     }
 
+    /** Local-only per-identifier readiness; a completed sweep is not required. */
+    public function registered(string $resource, string $identifier): bool
+    {
+        if (! $this->supported() || DeliveryIdentifier::parameters($resource, $identifier) === null) return false;
+        try {
+            $record = $this->load();
+            return $record['initialized'] && ! $record['upgrade_incomplete']
+                && $record['overflowed_at'] === null && count($record['items']) <= $this->maxItems
+                && isset($record['items'][$this->itemKey($resource, $identifier)]);
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
     /** Explicit bounded upgrade from the old cache index; no HTTP or cache deletion. */
     public function importLegacy(OnDemandDelivery $delivery): array
     {

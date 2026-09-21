@@ -56,12 +56,12 @@ class DeliveryOnDemandReadTest extends TestCase
         ]);
 
         $formatOne = $this->delivery(cacheFormat: 1);
-        $first = $formatOne->read('cms-page', 'slug:article', new WaitBudget(500));
+        $first = $formatOne->refresh('cms-page', 'slug:article', new WaitBudget(500));
         $this->assertSame('Format one', $first->snapshot?->payload['page']['title']);
         $this->assertSame('Format one', $formatOne->read('cms-page', 'slug:article', new WaitBudget(500))->snapshot?->payload['page']['title']);
 
         $formatTwo = $this->delivery(cacheFormat: 2);
-        $second = $formatTwo->read('cms-page', 'slug:article', new WaitBudget(500));
+        $second = $formatTwo->refresh('cms-page', 'slug:article', new WaitBudget(500));
         $this->assertSame('Format two', $second->snapshot?->payload['page']['title']);
         $this->assertSame('Format two', $formatTwo->read('cms-page', 'slug:article', new WaitBudget(500))->snapshot?->payload['page']['title']);
         Http::assertSentCount(2);
@@ -76,7 +76,7 @@ class DeliveryOnDemandReadTest extends TestCase
         ]);
 
         $delivery = $this->delivery();
-        $fresh = $delivery->read('cms-page', 'slug:article', new WaitBudget(500));
+        $fresh = $delivery->refresh('cms-page', 'slug:article', new WaitBudget(500));
         $this->assertSame('Stable body', $fresh->snapshot?->payload['page']['title']);
         $originalUsableUntil = $fresh->snapshot?->usableUntilMs;
 
@@ -95,7 +95,7 @@ class DeliveryOnDemandReadTest extends TestCase
         $this->assertSame($originalUsableUntil, $preserved->snapshot?->usableUntilMs);
 
         $blocked = $delivery->read('cms-page', 'slug:other', new WaitBudget(500));
-        $this->assertSame('backoff', $blocked->error);
+        $this->assertSame('cache_miss', $blocked->error);
         Http::assertSentCount(2);
     }
 
@@ -115,7 +115,7 @@ class DeliveryOnDemandReadTest extends TestCase
         $delivery = $this->delivery();
         $this->assertSame(
             'Stable CMS',
-            $delivery->read('cms-page', 'slug:article', new WaitBudget(500))->snapshot?->payload['page']['title'],
+            $delivery->refresh('cms-page', 'slug:article', new WaitBudget(500))->snapshot?->payload['page']['title'],
         );
         $this->assertSame(
             'Ready',
@@ -151,7 +151,7 @@ class DeliveryOnDemandReadTest extends TestCase
         $this->assertTrue($worklist->prepare());
         $delivery = $this->delivery(worklist: $worklist);
 
-        $this->assertNotNull($delivery->read('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
+        $this->assertNotNull($delivery->refresh('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
         $this->now += 300_000;
 
         $this->assertNotNull($delivery->read('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
@@ -169,7 +169,7 @@ class DeliveryOnDemandReadTest extends TestCase
                 '*' => Http::response($this->cmsPayload('article', 'Durable body'), 200, ['Content-Type' => 'application/json']),
             ]);
             $delivery = $this->delivery();
-            $this->assertNotNull($delivery->read('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
+            $this->assertNotNull($delivery->refresh('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
 
             $this->now += 8 * 86_400_000;
             CarbonImmutable::setTestNow($wallClock->addDays(8));
@@ -184,7 +184,7 @@ class DeliveryOnDemandReadTest extends TestCase
         }
     }
 
-    public function test_multiple_cold_reads_share_one_fractional_wait_budget(): void
+    public function test_explicit_background_refreshes_share_one_fractional_wait_budget(): void
     {
         $elapsed = 0.0;
         $timeouts = [];
@@ -204,21 +204,21 @@ class DeliveryOnDemandReadTest extends TestCase
         });
         $delivery = $this->delivery();
 
-        $this->assertNotNull($delivery->read('cms-page', 'slug:first', $budget)->snapshot);
-        $this->assertNotNull($delivery->read('cms-page', 'slug:second', $budget)->snapshot);
-        $this->assertSame('budget_exhausted', $delivery->read('cms-page', 'slug:third', $budget)->error);
+        $this->assertNotNull($delivery->refresh('cms-page', 'slug:first', $budget)->snapshot);
+        $this->assertNotNull($delivery->refresh('cms-page', 'slug:second', $budget)->snapshot);
+        $this->assertSame('budget_exhausted', $delivery->refresh('cms-page', 'slug:third', $budget)->error);
         $this->assertSame([1.0, 0.25], $timeouts);
     }
 
-    public function test_same_page_and_cross_page_capacity_never_wait_or_start_extra_http(): void
+    public function test_same_page_and_cross_page_background_capacity_never_wait_or_start_extra_http(): void
     {
         $nested = [];
         $delivery = $this->delivery();
         $otherProcess = $this->delivery();
 
         Http::fake(function ($request) use ($otherProcess, &$nested) {
-            $nested['same'] = $otherProcess->read('cms-page', 'slug:outer', new WaitBudget(500))->error;
-            $nested['other'] = $otherProcess->read('cms-page', 'slug:other', new WaitBudget(500))->error;
+            $nested['same'] = $otherProcess->refresh('cms-page', 'slug:outer', new WaitBudget(500))->error;
+            $nested['other'] = $otherProcess->refresh('cms-page', 'slug:other', new WaitBudget(500))->error;
 
             return Http::response(
                 $this->cmsPayload((string) $request['slug'], 'Outer'),
@@ -227,7 +227,7 @@ class DeliveryOnDemandReadTest extends TestCase
             );
         });
 
-        $outer = $delivery->read('cms-page', 'slug:outer', new WaitBudget(500));
+        $outer = $delivery->refresh('cms-page', 'slug:outer', new WaitBudget(500));
 
         $this->assertSame('Outer', $outer->snapshot?->payload['page']['title']);
         $this->assertSame(['same' => 'capacity', 'other' => 'capacity'], $nested);
@@ -244,11 +244,11 @@ class DeliveryOnDemandReadTest extends TestCase
         ]);
 
         $delivery = $this->delivery();
-        $first = $delivery->read('cms-page', 'slug:article', new WaitBudget(500));
+        $first = $delivery->refresh('cms-page', 'slug:article', new WaitBudget(500));
         $this->assertSame('invalid_response', $first->error);
 
         $this->now += 30000;
-        $second = $delivery->read('cms-page', 'slug:article', new WaitBudget(500));
+        $second = $delivery->refresh('cms-page', 'slug:article', new WaitBudget(500));
         $this->assertSame('Recovered', $second->snapshot?->payload['page']['title']);
         Http::assertSentCount(2);
     }
@@ -257,17 +257,24 @@ class DeliveryOnDemandReadTest extends TestCase
     {
         Http::fake(function ($request) {
             if (str_contains($request->url(), '/cms-page')) {
-                return Http::response(['status' => 'unavailable'], 403, ['Content-Type' => 'application/json']);
+                return Http::response([
+                    'status' => 'unavailable',
+                    'error' => 'cms_disabled',
+                    'denial' => ['contract' => '2', 'scope' => 'cms'],
+                ], 403, ['Content-Type' => 'application/json']);
             }
             if (str_contains($request->url(), '/aeo')) {
                 return Http::response($this->aeoPayload('/products/article'), 200, ['Content-Type' => 'application/json']);
             }
 
-            return Http::response(['status' => 'unavailable'], 401, ['Content-Type' => 'application/json']);
+            return Http::response([
+                'status' => 'unavailable',
+                'error' => 'invalid_key',
+            ], 401, ['Content-Type' => 'application/json']);
         });
 
         $delivery = $this->delivery();
-        $cms = $delivery->read('cms-page', 'slug:article', new WaitBudget(500));
+        $cms = $delivery->refresh('cms-page', 'slug:article', new WaitBudget(500));
         $this->assertSame(403, $cms->httpStatus);
         $this->assertSame('access_denied', $cms->error);
 
@@ -275,7 +282,7 @@ class DeliveryOnDemandReadTest extends TestCase
         $this->assertNotNull($aeo->snapshot);
         $this->assertSame('access_denied', $delivery->read('cms-page', 'slug:other', new WaitBudget(500))->error);
 
-        $file = $delivery->read('site-file', 'kind:robots', new WaitBudget(500));
+        $file = $delivery->refresh('site-file', 'kind:robots', new WaitBudget(500));
         $this->assertSame(401, $file->httpStatus);
         $this->assertSame('access_denied', $file->error);
         $this->assertSame('access_denied', $delivery->refresh('aeo', 'path:/other', new WaitBudget(500))->error);
@@ -302,12 +309,12 @@ class DeliveryOnDemandReadTest extends TestCase
         $this->assertSame('access_denied', $delivery->refresh('markdown', 'path:/products/article', new WaitBudget(500))->error);
         $this->assertSame('access_denied', $delivery->read('site-file', 'kind:robots', new WaitBudget(500))->error);
 
-        $cms = $delivery->read('cms-page', 'slug:article', new WaitBudget(500));
+        $cms = $delivery->refresh('cms-page', 'slug:article', new WaitBudget(500));
         $this->assertSame('Visible', $cms->snapshot?->payload['page']['title']);
         Http::assertSentCount(2);
     }
 
-    public function test_unsupported_process_local_cache_fails_closed_without_http(): void
+    public function test_unsupported_process_local_cache_blocks_background_http(): void
     {
         Http::fake();
         $delivery = new OnDemandDelivery(
@@ -317,7 +324,7 @@ class DeliveryOnDemandReadTest extends TestCase
             clock: fn (): int => $this->now,
         );
 
-        $result = $delivery->read('cms-page', 'slug:article', new WaitBudget(500));
+        $result = $delivery->refresh('cms-page', 'slug:article', new WaitBudget(500));
 
         $this->assertSame('capacity', $result->error);
         Http::assertNothingSent();

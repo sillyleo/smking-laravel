@@ -59,6 +59,7 @@ class DeliveryOnDemandClientTest extends TestCase
 
         $delivery = $this->app->make(OnDemandDelivery::class);
         $delivery->refresh('aeo', 'path:/products/article', new WaitBudget(500));
+        $delivery->refresh('cms-page', 'slug:article', new WaitBudget(500));
 
         $aeo = $this->app->make(AeoClient::class)->forPath('/products/article');
         $cms = $this->app->make(CmsClient::class)->forSlug('article');
@@ -78,6 +79,7 @@ class DeliveryOnDemandClientTest extends TestCase
             '*' => Http::response($this->payload('cms-page', 'slug:article'), 200, ['Content-Type' => 'application/json']),
         ]);
 
+        $this->app->make(OnDemandDelivery::class)->refresh('cms-page', 'slug:article', new WaitBudget(500));
         $aeo = $this->app->make(AeoClient::class)->forPath('/products/article');
         $markdown = $this->app->make(AeoClient::class)->getMarkdown('/products/article');
         $publicFile = $this->app->make(AeoClient::class)->fetchPublicFile('robots');
@@ -110,6 +112,7 @@ class DeliveryOnDemandClientTest extends TestCase
         $delivery = $this->app->make(OnDemandDelivery::class);
         $delivery->refresh('aeo', 'product_id:130', new WaitBudget(500));
         $delivery->refresh('markdown', 'path:/products/article', new WaitBudget(500));
+        $delivery->refresh('site-file', 'kind:robots', new WaitBudget(500));
 
         $client = $this->app->make(AeoClient::class);
         $this->assertTrue($client->forProductId(130)->isReady());
@@ -147,6 +150,11 @@ class DeliveryOnDemandClientTest extends TestCase
         Http::assertSentCount(1);
         Http::assertSent(fn ($request): bool => str_contains($request->url(), '/api/v1/public/page')
             && $request['preview_token'] === 'TOK');
+        $this->assertFalse($this->app->make(OnDemandDelivery::class)->hasState('cms-page', 'slug:article'));
+
+        $this->app->instance('request', \Illuminate\Http\Request::create('/blog/article', 'GET'));
+        $this->assertSame('server_error', $this->app->make(CmsClient::class)->forSlug('article')->status);
+        Http::assertSentCount(1);
     }
 
     /**

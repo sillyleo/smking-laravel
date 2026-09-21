@@ -168,7 +168,7 @@ class DeliveryUpgradeSafetyTest extends TestCase
     {
         Http::fakeSequence()
             ->push($this->payload('a'), 200, ['Content-Type' => 'application/json'])
-            ->push(['status' => 'unavailable'], 401, ['Content-Type' => 'application/json']);
+            ->push(['status' => 'unavailable', 'error' => 'invalid_key'], 401, ['Content-Type' => 'application/json']);
 
         $client = $this->app->make(CmsClient::class);
         $this->assertTrue($client->forSlug('article')->isReady());

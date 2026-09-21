@@ -263,17 +263,12 @@ class CmsClient
 
     private function onDemandRead(string $resource, string $identifier): ?DeliveryResult
     {
-        if ($this->delivery === null || $this->deliveryBudget === null) {
+        if ($this->delivery === null) {
             return null;
         }
 
         try {
-            $budget = ($this->deliveryBudget)();
-            if (! $budget instanceof WaitBudget) {
-                return null;
-            }
-
-            return $this->delivery->read($resource, $identifier, $budget);
+            return $this->delivery->read($resource, $identifier);
         } catch (Throwable) {
             return null;
         }
