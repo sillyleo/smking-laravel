@@ -106,14 +106,28 @@ final class DeliveryTargetState
     /** @return array{status:string,record:?array} */
     public function apply(array $target): array
     {
+        return $this->applyOrdered($target);
+    }
+
+    /** Validated GET evidence uses the same fences, even without webhook configuration. */
+    public function applyFetched(array $target, ?string $expectedToken): array
+    {
+        return $this->applyOrdered($target, true, $expectedToken);
+    }
+
+    private function applyOrdered(array $target, bool $fetched = false, ?string $expectedToken = null): array
+    {
         $target = self::normalize($target);
-        if ($target === null || ! $this->available()) {
+        if ($target === null || (! $fetched && ! $this->available())) {
             return ['status' => 'invalid', 'record' => null];
         }
 
         try {
-            $result = $this->locked($target['identifier'], function () use ($target): array {
+            $result = $this->locked($target['identifier'], function () use ($target, $fetched, $expectedToken): array {
                 $current = $this->read($target['identifier'], $target['resource']);
+                if ($fetched && ($current['token'] ?? null) !== $expectedToken) {
+                    return ['status' => 'superseded', 'record' => $current];
+                }
                 if ($current !== null) {
                     $previous = $current['target'];
                     $order = [$target['revision'], $target['generation']]

@@ -270,32 +270,15 @@ class DoctorCommand extends Command
             return ['status' => 'info', 'label' => 'Daily delivery reconciliation', 'detail' => 'not required while delivery mode is legacy'];
         }
         $status = $reconciliation->status();
-        if ($status['error'] === 'registry_full') {
-            return ['status' => 'info', 'label' => 'Daily delivery reconciliation', 'detail' => sprintf(
-                'local registry reached its %d-item limit; raise SMKING_DELIVERY_RECONCILE_ITEMS before relying on daily freshness checks',
-                $status['known'],
-            )];
-        }
-        if ($status['error'] !== null) {
-            return ['status' => 'info', 'label' => 'Daily delivery reconciliation', 'detail' => 'local state unavailable; use a shared File or Redis cache and verify `php artisan schedule:run`'];
-        }
-        if ($status['last_run_at'] === null) {
-            return ['status' => 'info', 'label' => 'Daily delivery reconciliation', 'detail' => sprintf(
-                'scheduler run not observed; verify Laravel scheduler executes every minute (site check runs at 03:%02d in app timezone)',
-                $status['scheduled_minute'],
-            )];
-        }
-
-        $age = (int) floor(microtime(true) * 1000) - $status['last_run_at'];
-        if ($age > 36 * 3_600_000) {
-            return ['status' => 'info', 'label' => 'Daily delivery reconciliation', 'detail' => 'last scheduler run is older than 36 hours; verify `php artisan schedule:run`'];
-        }
-
-        return ['status' => 'pass', 'label' => 'Daily delivery reconciliation', 'detail' => sprintf(
-            'last run observed; %d known item(s), daily check runs at 03:%02d',
-            $status['known'],
-            $status['scheduled_minute'],
-        )];
+        $detail = sprintf(
+            'round=%s; known=%s; eligible=%s; checked=%d; refreshed=%d; pending=%s; failed=%d; in_flight=%s; last_completed=%s; error=%s. Start 03:%02d, continue each minute until 04:00 in app timezone; verify `php artisan schedule:run`',
+            $status['round_date'] ?? 'none', $status['known'] ?? 'unknown', $status['eligible'] ?? 'unknown',
+            $status['checked'], $status['refreshed'], $status['pending'] ?? 'unknown', $status['failed'],
+            $status['in_flight'] ? 'yes' : 'no', $status['last_completed_on'] ?? 'none',
+            $status['error'] ?? 'none', $status['scheduled_minute'],
+        );
+        return ['status' => $status['complete'] && $status['error'] === null ? 'pass' : 'info',
+            'label' => 'Daily delivery reconciliation', 'detail' => $detail];
     }
 
     /**

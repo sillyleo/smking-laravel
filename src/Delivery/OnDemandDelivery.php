@@ -183,7 +183,12 @@ final class OnDemandDelivery
 
                 return $this->putState($resource, $identifier, $state);
             });
-            return $imported === true ? $this->peek($resource, $identifier) : new DeliveryResult(error: 'cache_busy');
+            if ($imported !== true) return new DeliveryResult(error: 'cache_busy');
+            $result = $this->peek($resource, $identifier);
+            if ($result->httpStatus === 200 && $result->snapshot !== null && $this->reconciliation !== null
+                && ! $this->reconciliation->remember($result->snapshot, imported: true)
+            ) return new DeliveryResult(error: 'registry_unavailable');
+            return $result;
         } catch (Throwable) {
             return new DeliveryResult(error: 'cache_unavailable');
         }
@@ -243,6 +248,11 @@ final class OnDemandDelivery
                     && $this->matchesTarget($cached->snapshot, $target)
                     && ! ($this->state($resource, $identifier)['refresh_requested'] ?? false)
                 ) {
+                    if ($cached->httpStatus === 200 && $this->reconciliation !== null
+                        && ! $this->reconciliation->remember($cached->snapshot)
+                    ) {
+                        return new DeliveryResult(error: 'registry_unavailable');
+                    }
                     return $cached;
                 }
 
@@ -267,6 +277,22 @@ final class OnDemandDelivery
                     $this->recordControlFailure($resource, $fetched);
 
                     return $fetched;
+                }
+                $publication = $fetched->snapshot->payload['delivery']['publication'] ?? null;
+                if ($publication !== null) {
+                    // Adopt only source-paired ordering evidence, never just a
+                    // different hash or a newer validation timestamp. A webhook
+                    // received during this GET wins, even if the GET looks newer.
+                    $accepted = $this->targets->applyFetched($publication, $targetToken);
+                    if (! in_array($accepted['status'], ['applied', 'duplicate'], true)) {
+                        return new DeliveryResult(error: match ($accepted['status']) {
+                            'superseded' => 'superseded',
+                            'unavailable' => 'cache_unavailable',
+                            default => 'target_mismatch',
+                        });
+                    }
+                    $target = $accepted['record'];
+                    $targetToken = $target['token'];
                 }
                 if (! $this->matchesTarget($fetched->snapshot, $target)) {
                     $mismatch = new DeliveryResult(httpStatus: $fetched->httpStatus, error: 'target_mismatch');
@@ -353,10 +379,6 @@ final class OnDemandDelivery
                 $this->cacheFormat,
             );
             if ($snapshot !== null) {
-                if ($status === 200) {
-                    $this->reconciliation?->remember($snapshot);
-                }
-
                 return new DeliveryResult(
                     snapshot: $snapshot,
                     httpStatus: $status,
@@ -407,6 +429,15 @@ final class OnDemandDelivery
                 return $cached;
             }
 
+            // A newer publication may reveal a missed withdrawal. Old bodies
+            // must not reappear if persisting the replacement then fails.
+            $bodyRevision = $cached->snapshot->payload['delivery']['publication']['revision'] ?? 0;
+            if ($record['target']['withdrawalRevision'] > 0
+                && $bodyRevision <= $record['target']['withdrawalRevision']
+            ) {
+                return new DeliveryResult(error: 'target_pending', refreshRequired: true);
+            }
+
             return new DeliveryResult(
                 snapshot: $cached->snapshot,
                 httpStatus: $cached->httpStatus,
@@ -423,7 +454,10 @@ final class OnDemandDelivery
     {
         return $target === null
             || ($target['target']['action'] === 'update'
-                && ($snapshot->payload['delivery']['content_version'] ?? null) === $target['target']['contentVersion']);
+                && ($snapshot->payload['delivery']['content_version'] ?? null) === $target['target']['contentVersion'])
+            || ($target['target']['action'] === 'withdraw'
+                && ($snapshot->payload['status'] ?? null) === 'not_found'
+                && DeliveryTargetState::normalize($snapshot->payload['delivery']['publication'] ?? []) === $target['target']);
     }
 
     private function guardTarget(
@@ -466,6 +500,11 @@ final class OnDemandDelivery
                 }
 
                 $missing = $result->httpStatus === 404;
+                if (! $missing && $this->reconciliation !== null
+                    && ! $this->reconciliation->remember($result->snapshot)
+                ) {
+                    return 'registry_unavailable';
+                }
                 $state['success'] = $missing ? null : $result->snapshot->toCache($this->cacheFormat);
                 $state['missing'] = $missing ? $result->snapshot->toCache($this->cacheFormat) : null;
                 unset($state['refresh_requested']);
@@ -479,9 +518,7 @@ final class OnDemandDelivery
         });
 
         if ($committed === 'committed') {
-            if ($result->httpStatus === 200) {
-                $this->reconciliation?->remember($result->snapshot);
-            } elseif ($result->httpStatus === 404) {
+            if ($result->httpStatus === 404) {
                 $this->reconciliation?->forget($resource, $identifier);
             }
 

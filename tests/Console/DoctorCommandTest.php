@@ -217,7 +217,9 @@ class DoctorCommandTest extends TestCase
             $display = $output->fetch();
 
             $this->assertStringContainsString('Daily delivery reconciliation', $display);
-            $this->assertStringContainsString('scheduler run not observed', $display);
+            $this->assertStringContainsString('round=none', $display);
+            $this->assertStringContainsString('last_completed=none', $display);
+            $this->assertStringContainsString('registry_uninitialized', $display);
         } finally {
             (new \Illuminate\Filesystem\Filesystem())->deleteDirectory($directory);
         }

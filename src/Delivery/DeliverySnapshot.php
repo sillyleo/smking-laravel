@@ -68,6 +68,20 @@ final class DeliverySnapshot
             return null;
         }
 
+        if (array_key_exists('publication', $delivery)) {
+            $publication = is_array($delivery['publication']) ? DeliveryTargetState::normalize($delivery['publication']) : null;
+            if ($publication === null || $publication['resource'] !== $resource
+                || $publication['identifier'] !== $identifier
+                || $publication['revision'] < 1 || $publication['generation'] !== $publication['revision']
+                || ($status === 'ready'
+                    ? ($publication['action'] !== 'update' || $publication['withdrawalRevision'] >= $publication['revision']
+                        || $publication['contentVersion'] !== $delivery['content_version'])
+                    : $publication['action'] !== 'withdraw')
+            ) {
+                return null;
+            }
+        }
+
         return new self(
             resource: $resource,
             identifier: $identifier,

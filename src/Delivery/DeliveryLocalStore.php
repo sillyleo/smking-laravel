@@ -9,7 +9,9 @@ use RuntimeException;
 /**
  * Private, versioned local records independent of Laravel cache eviction.
  * Readers see a complete old or new record. Mutators hold locked() across
- * read/check/write; locks never span HTTP and never wait. Local filesystems only.
+ * read/check/write; content locks never span HTTP and never wait. A separate
+ * background runner lock may cover bounded HTTP, without blocking content reads.
+ * Local filesystems only.
  */
 final class DeliveryLocalStore
 {

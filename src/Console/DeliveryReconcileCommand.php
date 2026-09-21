@@ -8,15 +8,21 @@ use Illuminate\Console\Command;
 use Smking\Laravel\Delivery\DeliveryReconciliation;
 use Smking\Laravel\Delivery\OnDemandDelivery;
 
-/** One bounded daily check of previously successful delivery content. */
+/** One bounded slice of the daily round, or an explicit local index upgrade. */
 final class DeliveryReconcileCommand extends Command
 {
-    protected $signature = 'smking:delivery:reconcile {--status : Read reconciliation state without writes or HTTP}';
+    protected $signature = 'smking:delivery:reconcile {--status : Read reconciliation state without writes or HTTP} {--import-index : Import the old cache index after local content has been imported, without HTTP}';
 
     protected $description = 'Revalidate known smking content once per day without visitor traffic';
 
     public function handle(DeliveryReconciliation $reconciliation, OnDemandDelivery $delivery): int
     {
+        if ($this->option('status') && $this->option('import-index')) return self::FAILURE;
+        if ($this->option('import-index')) {
+            $result = $reconciliation->importLegacy($delivery);
+            $this->line(json_encode($result, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR));
+            return $result['error'] === null ? self::SUCCESS : self::FAILURE;
+        }
         if ($this->option('status')) {
             $status = $reconciliation->status();
             $this->line(json_encode($status, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR));

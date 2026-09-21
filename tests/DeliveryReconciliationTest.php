@@ -13,6 +13,7 @@ use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Support\Facades\Http;
 use Smking\Laravel\Delivery\DeliveryReconciliation;
 use Smking\Laravel\Delivery\DeliveryNotificationHealth;
+use Smking\Laravel\Delivery\DeliveryTargetState;
 use Smking\Laravel\Delivery\OnDemandDelivery;
 use Smking\Laravel\Delivery\WaitBudget;
 
@@ -134,7 +135,43 @@ class DeliveryReconciliationTest extends TestCase
         $this->assertSame('AEO 2', $delivery->peek('aeo', 'path:/products/article')->snapshot?->payload['summary']);
     }
 
-    public function test_cached_success_from_before_upgrade_is_registered_on_read(): void
+    public function test_daily_fallback_advances_past_the_last_notified_version(): void
+    {
+        config()->set('smking.delivery.notifications_enabled', true);
+        config()->set('smking.delivery.notifications_scope', str_repeat('d', 64));
+        $title = 'Version B';
+        Http::preventStrayRequests();
+        Http::fake(function () use (&$title) {
+            $payload = $this->cmsPayload('article', $title);
+            $revision = $title === 'Version B' ? 2 : 3;
+            $payload['delivery']['publication'] = [
+                'resource' => 'cms-page', 'identifier' => 'slug:article', 'action' => 'update',
+                'revision' => $revision, 'generation' => $revision, 'withdrawalRevision' => 0,
+                'contentVersion' => $payload['delivery']['content_version'],
+            ];
+            return Http::response($payload, 200);
+        });
+        $reconciliation = $this->reconciliation();
+        $delivery = $this->delivery($reconciliation);
+        $targets = new DeliveryTargetState($this->cache, config(), fn () => $this->now);
+        $this->assertSame('applied', $targets->apply([
+            'resource' => 'cms-page', 'identifier' => 'slug:article',
+            'revision' => 2, 'generation' => 2, 'withdrawalRevision' => 0,
+            'action' => 'update', 'contentVersion' => 'sha256:'.hash('sha256', 'article|Version B'),
+        ])['status']);
+        $this->assertSame('Version B', $delivery->refresh('cms-page', 'slug:article', new WaitBudget(500))->snapshot?->payload['page']['title']);
+
+        // The source publishes C, but its notification never reaches this host.
+        $title = 'Version C';
+        $this->now = $this->time(sprintf('2026-09-19 03:%02d:00', $reconciliation->scheduledMinute()));
+        $summary = $reconciliation->runBatch($delivery, 10, 5000);
+        Http::assertSentCount(2);
+        $this->assertSame(1, $summary['checked']);
+        $this->assertSame(1, $summary['refreshed']);
+        $this->assertSame('Version C', $delivery->peek('cms-page', 'slug:article')->snapshot?->payload['page']['title']);
+    }
+
+    public function test_existing_local_content_is_enrolled_by_background_preparation_not_visitors(): void
     {
         Http::fake(fn () => Http::response(
             $this->cmsPayload('article', 'Existing CMS'),
@@ -152,6 +189,8 @@ class DeliveryReconciliationTest extends TestCase
         $reconciliation = $this->reconciliation();
         $delivery = $this->delivery($reconciliation);
         $this->assertNotNull($delivery->read('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
+        $this->assertSame(0, $reconciliation->status()['known']);
+        $this->assertNotNull($delivery->refresh('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
         $this->assertSame(1, $reconciliation->status()['known']);
         Http::assertSentCount(1);
 
@@ -214,10 +253,80 @@ class DeliveryReconciliationTest extends TestCase
         ));
 
         $this->assertCount(1, $events);
-        $minute = $this->app->make(DeliveryReconciliation::class)->scheduledMinute();
-        $this->assertSame($minute.' 3 * * *', $events[0]->expression);
+        $this->assertSame('* 3 * * *', $events[0]->expression);
         $this->assertSame('Asia/Taipei', $events[0]->timezone);
         $this->assertTrue($events[0]->withoutOverlapping);
+    }
+
+    public function test_fifty_known_items_continue_across_batches_without_rechecking_the_front(): void
+    {
+        Http::preventStrayRequests();
+        Http::fake(function ($request) {
+            $resource = basename(parse_url($request->url(), PHP_URL_PATH));
+            $payload = match ($resource) {
+                'cms-page' => $this->cmsPayload($request['slug'], 'CMS'),
+                'aeo' => $this->aeoPayload($request['path'], 'AEO'),
+                'markdown' => ['status' => 'ready', 'document' => ['path' => $request['path'], 'body' => '# Saved', 'content_type' => 'text/markdown; charset=utf-8']],
+                'site-file' => ['status' => 'ready', 'document' => ['kind' => $request['kind'], 'body' => 'Saved',
+                    'content_type' => $request['kind'] === 'sitemap' ? 'application/xml; charset=utf-8' : 'text/plain; charset=utf-8']],
+            };
+            return Http::response($payload + ['delivery' => $this->deliveryMetadata($request->url())], 200);
+        });
+        $reconciliation = $this->reconciliation();
+        $delivery = $this->delivery($reconciliation);
+        for ($i = 0; $i < 16; $i++) {
+            $this->assertNotNull($delivery->refresh('cms-page', 'slug:article-'.$i, new WaitBudget(500))->snapshot);
+            $this->assertNotNull($delivery->refresh('aeo', 'path:/article-'.$i, new WaitBudget(500))->snapshot);
+            if ($i < 15) $this->assertNotNull($delivery->refresh('markdown', 'path:/article-'.$i, new WaitBudget(500))->snapshot);
+        }
+        foreach (['sitemap', 'robots', 'llms_txt'] as $kind) {
+            $this->assertNotNull($delivery->refresh('site-file', 'kind:'.$kind, new WaitBudget(500))->snapshot);
+        }
+        Http::assertSentCount(50);
+        $this->now = $this->time(sprintf('2026-09-19 03:%02d:00', $reconciliation->scheduledMinute()));
+        for ($batch = 0; $batch < 5; $batch++) {
+            // Construct a new instance to simulate the next scheduler process.
+            $reconciliation = $this->reconciliation();
+            $summary = $reconciliation->runBatch($this->delivery($reconciliation), 10, 5000);
+            $this->assertSame(10, $summary['checked'], 'batch '.$batch);
+            $this->now += 1000;
+        }
+        Http::assertSentCount(100);
+        $this->assertTrue($reconciliation->status()['complete']);
+        $this->assertSame(50, $reconciliation->status()['checked']);
+        $this->assertSame(0, $reconciliation->runBatch($delivery, 10, 5000)['checked']);
+        Http::assertSentCount(100);
+    }
+
+    public function test_registry_and_daily_progress_survive_cache_flush(): void
+    {
+        Http::fake(fn () => Http::response($this->cmsPayload('article', 'CMS'), 200));
+        $reconciliation = $this->reconciliation();
+        $delivery = $this->delivery($reconciliation);
+        $this->assertNotNull($delivery->refresh('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
+        $this->now = $this->time(sprintf('2026-09-19 03:%02d:00', $reconciliation->scheduledMinute()));
+        $this->assertSame(1, $reconciliation->runBatch($delivery, 10, 5000)['checked']);
+        $this->cache->flush();
+        $restarted = $this->reconciliation();
+        $this->assertSame(1, $restarted->status()['known']);
+        $this->assertSame(0, $restarted->runBatch($this->delivery($restarted), 10, 5000)['checked']);
+        Http::assertSentCount(2);
+    }
+
+    public function test_paused_aeo_is_not_checked_but_cms_still_is(): void
+    {
+        Http::fake(fn ($request) => str_contains($request->url(), '/cms-page')
+            ? Http::response($this->cmsPayload('article', 'CMS'), 200)
+            : Http::response($this->aeoPayload('/article', 'AEO'), 200));
+        $reconciliation = $this->reconciliation();
+        $delivery = $this->delivery($reconciliation);
+        $delivery->refresh('cms-page', 'slug:article', new WaitBudget(500));
+        $delivery->refresh('aeo', 'path:/article', new WaitBudget(500));
+        config()->set('smking.delivery.aeo_enabled', false);
+        $this->now = $this->time(sprintf('2026-09-19 03:%02d:00', $reconciliation->scheduledMinute()));
+        $summary = $reconciliation->runBatch($delivery, 10, 5000);
+        $this->assertSame(1, $summary['checked']);
+        $this->assertSame(0, $summary['failed']);
     }
 
     private function reconciliation(): DeliveryReconciliation

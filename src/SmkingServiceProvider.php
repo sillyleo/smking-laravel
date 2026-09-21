@@ -288,9 +288,8 @@ class SmkingServiceProvider extends ServiceProvider
 
             $this->callAfterResolving(Schedule::class, function (Schedule $schedule): void {
                 $timezone = $this->app['config']->get('app.timezone', 'UTC');
-                $minute = $this->app->make(DeliveryReconciliation::class)->scheduledMinute();
                 $schedule->command(DeliveryReconcileCommand::class)
-                    ->cron($minute.' 3 * * *')
+                    ->cron('* 3 * * *')
                     ->timezone(is_string($timezone) && $timezone !== '' ? $timezone : 'UTC')
                     ->withoutOverlapping(10);
             });
