@@ -127,6 +127,10 @@ class SmkingServiceProvider extends ServiceProvider
             );
         });
 
+        $this->app->singleton(\Smking\Laravel\Delivery\DeliveryNotificationHealth::class, function ($app) use ($deliveryCache) {
+            return new \Smking\Laravel\Delivery\DeliveryNotificationHealth($deliveryCache($app), $app['config']);
+        });
+
         $this->app->singleton(OnDemandDelivery::class, function ($app) use ($deliveryCache): OnDemandDelivery {
             $config = $app->make(\Illuminate\Contracts\Config\Repository::class);
             $format = $config->get('smking.delivery.cache_format', DeliverySnapshot::CACHE_FORMAT);
@@ -156,6 +160,7 @@ class SmkingServiceProvider extends ServiceProvider
                 worklist: $app->make(DeliveryWorklist::class),
                 delivery: $app->make(OnDemandDelivery::class),
                 legacy: $app->make(LegacyCmsCache::class),
+                health: $app->make(\Smking\Laravel\Delivery\DeliveryNotificationHealth::class),
             );
         });
 

@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Http;
 use Smking\Laravel\CmsClient;
 use Smking\Laravel\Data\CmsPage;
 use Smking\Laravel\Delivery\DeliveryTargetState;
+use Smking\Laravel\Delivery\DeliveryWorklist;
 use Smking\Laravel\Delivery\OnDemandDelivery;
 use Smking\Laravel\Delivery\WaitBudget;
 
@@ -38,7 +39,7 @@ class DeliveryUpgradeSafetyTest extends TestCase
         parent::tearDown();
     }
 
-    public function test_legacy_notification_invalidates_both_cache_formats(): void
+    public function test_legacy_notification_keeps_v2_content_when_background_is_unavailable(): void
     {
         $available = true;
         Http::fake(function () use (&$available) {
@@ -52,12 +53,12 @@ class DeliveryUpgradeSafetyTest extends TestCase
         $this->assertTrue($this->delivery()->hasState('cms-page', 'slug:article'));
         Http::assertSentCount(2);
 
-        $this->notifyLegacy('article')->assertOk();
-        $this->assertSame('cache_miss', $this->delivery()->peek('cms-page', 'slug:article')->error);
+        $this->notifyLegacy('article')->assertStatus(503);
+        $this->assertNotNull($this->delivery()->peek('cms-page', 'slug:article')->snapshot);
         $available = false;
         config()->set('smking.delivery.mode', 'on_demand');
-        $this->assertSame(CmsPage::STATUS_SERVER_ERROR, $client->forSlug('article')->status);
-        Http::assertSentCount(3);
+        $this->assertTrue($client->forSlug('article')->isReady());
+        Http::assertSentCount(2);
         Http::assertSent(fn ($request): bool => str_contains($request->url(), '/api/v2/public/cms-page'));
     }
 
@@ -228,9 +229,10 @@ class DeliveryUpgradeSafetyTest extends TestCase
         $this->assertSame('cache_miss', $this->delivery()->peek('cms-page', 'slug:article')->error);
     }
 
-    public function test_legacy_aeo_notification_invalidates_both_versioned_path_formats(): void
+    public function test_legacy_aeo_notification_keeps_both_versioned_path_formats(): void
     {
         config()->set('smking.delivery.aeo_enabled', true);
+        $this->assertTrue($this->app->make(DeliveryWorklist::class)->prepare());
         Http::fake(function ($request) {
             $resource = str_contains($request->url(), '/markdown') ? 'markdown' : 'aeo';
 
@@ -252,11 +254,9 @@ class DeliveryUpgradeSafetyTest extends TestCase
         ])->assertOk();
 
         foreach (['aeo', 'markdown'] as $resource) {
-            $this->assertSame(
-                'cache_miss',
-                $this->delivery()->peek($resource, 'path:/products/article')->error,
-            );
+            $this->assertNotNull($this->delivery()->peek($resource, 'path:/products/article')->snapshot);
         }
+        $this->assertSame(2, $this->app->make(DeliveryWorklist::class)->status()['counts']['pending']);
         Http::assertSentCount(2);
     }
 

@@ -12,6 +12,7 @@ use Illuminate\Http\Client\Factory as HttpFactory;
 use ReflectionClass;
 use ReflectionException;
 use Smking\Laravel\Delivery\DeliveryReconciliation;
+use Smking\Laravel\Delivery\DeliveryNotificationHealth;
 use Smking\Laravel\Http\Middleware\InjectAeo;
 use Throwable;
 
@@ -30,7 +31,7 @@ class DoctorCommand extends Command
 
     protected $description = 'Verify smking SDK install + connectivity';
 
-    public function handle(Application $app, HttpFactory $http, DeliveryReconciliation $reconciliation): int
+    public function handle(Application $app, HttpFactory $http, DeliveryReconciliation $reconciliation, DeliveryNotificationHealth $notifications): int
     {
         $checks = [
             $this->checkConfigPublished($app),
@@ -41,6 +42,14 @@ class DoctorCommand extends Command
             $this->checkDeliveryReconciliation($reconciliation),
             $this->checkApiReachable($http),
         ];
+        if (config('smking.delivery.mode', 'legacy') === 'on_demand') {
+            foreach (DeliveryNotificationHealth::RESOURCES as $resource) {
+                $health = $notifications->status($resource);
+                $checks[] = ['status' => 'info', 'label' => 'Delivery notification '.$resource,
+                    'detail' => $health['available'] ? 'recent scoped receipt; expires within 24 hours'
+                        : 'daily fallback required: '.$health['reason']];
+            }
+        }
 
         $hasFailure = false;
         foreach ($checks as $check) {

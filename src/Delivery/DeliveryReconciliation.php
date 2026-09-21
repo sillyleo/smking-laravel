@@ -22,13 +22,17 @@ final class DeliveryReconciliation
 
     private readonly Closure $clock;
 
+    private readonly DeliveryNotificationHealth $notifications;
+
     public function __construct(
         private readonly CacheRepository $cache,
         private readonly ConfigRepository $config,
         ?Closure $clock = null,
         private readonly int $maxItems = 500,
+        ?DeliveryNotificationHealth $notifications = null,
     ) {
         $this->clock = $clock ?? static fn (): int => (int) floor(microtime(true) * 1000);
+        $this->notifications = $notifications ?? new DeliveryNotificationHealth($cache, $config, $this->clock);
     }
 
     public function scheduledMinute(): int
@@ -163,7 +167,7 @@ final class DeliveryReconciliation
             $budget = new WaitBudget($budgetMs);
             $deadline = hrtime(true) + $budgetMs * 1_000_000;
             for ($index = 0; $index < $maxJobs && hrtime(true) < $deadline; $index++) {
-                $item = $this->claim($date, $this->cmsNotificationsAvailable());
+                $item = $this->claim($date);
                 if ($item === false) {
                     break;
                 }
@@ -209,13 +213,13 @@ final class DeliveryReconciliation
     }
 
     /** @return array{resource:string,identifier:string}|false|null */
-    private function claim(string $date, bool $skipCms): array|false|null
+    private function claim(string $date): array|false|null
     {
-        return $this->locked(function () use ($date, $skipCms): array|false {
+        return $this->locked(function () use ($date): array|false {
             $record = $this->load();
             foreach ($record['items'] as $key => $item) {
                 if ($item['last_checked_on'] === $date
-                    || ($skipCms && $item['resource'] === 'cms-page')
+                    || $this->notifications->status($item['resource'])['available']
                 ) {
                     continue;
                 }
@@ -300,15 +304,6 @@ final class DeliveryReconciliation
         return (new DateTimeImmutable('@'.intdiv($milliseconds, 1000)))
             ->setTimezone(new DateTimeZone($timezone))
             ->format('Y-m-d');
-    }
-
-    private function cmsNotificationsAvailable(): bool
-    {
-        $scope = $this->config->get('smking.delivery.notifications_scope');
-
-        return $this->config->get('smking.delivery.notifications_enabled', false) === true
-            && is_string($scope)
-            && preg_match('/^[a-f0-9]{64}$/D', $scope) === 1;
     }
 
     private function site(): string

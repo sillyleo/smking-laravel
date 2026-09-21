@@ -353,7 +353,17 @@ php artisan smking:delivery:import --resource=aeo --identifier=path:/products/ar
 
 同一命令最多 20 筆、10 秒批次預算；不掃全庫、不呼叫來源、不改模式或舊 cache。只接受既有 v2 格式，不匯入舊 PHP SDK 物件；缺頁、失效或無法證明就緒時應重新預熱並核對，不能直接切換。移入權限及撤回後才移入本文，既有持久狀態不被舊 cache 覆蓋。完整持久目錄若從舊備份還原，必須重新核對來源／撤回及就緒狀態後才公開，不能假設舊備份仍獲授權。
 
-L2 的四類通知一致性、L3 的完整每日巡檢及 L4 的首次準備／所有訪客零下載仍未完成。現有每日任務只在站台分鐘啟動單批、僅 CMS 通知略過後備，不能當成最終契約；既有冷頁分支仍可能取得內容。套件不啟動主機 scheduler，客戶仍須自行執行 Laravel scheduler 與背景 worker。正式使用前須完成上述切片及真實主機驗收。
+L2A 接收端已加入四類共同的 `content_delivery_v2` 更新／撤回處理，原 `cms_delivery_v2` 仍只接受 CMS。一般更新保留本文及每日索引，背景下載須符合通知版本才替換；撤回與亂序保護涵蓋目前 SDK 的 `legacy` 模式。切回模式不等於任意降級舊套件：不認識新撤回紀錄的版本不得直接作安全回退。
+
+舊 `cms_page`／`aeo` 通知仍清理 v1 cache，但對既有 v2 副本（或已開啟的 `on_demand` 模式）只登記背景檢查，不先清本文；即使本文還在 freshness 時間內，worker 也會處理更新提示。舊通知沒有版本，不能冒充有序撤回或已驗證通知能力。工作未能登記會回 503 並保留副本；`registered` 只表示已受理，不代表客戶已取得新版。執行中再次收到登記不會被前一次完成動作清掉，既有工作期限及重試上限不延長。
+
+L2B 本機候選已接上 SaaS 發送與逐資源接收紀錄。SaaS 須先套用 `0087_notification_site_files`（僅放寬 SaaS 通知表的公共檔案限制），並明確設定站台 `config.contentDeliveryNotificationResources`，例如 `["cms-page", "aeo", "markdown", "site-file"]`；本次沒有替任何站台設定或套用。未設定該清單時，既有 `cmsDeliveryNotificationsEnabled` 仍只使用原 CMS 通知格式。原有全域旗標、來源／scope／金鑰、webhook 設定及 CDN 就緒條件均保留，安裝套件不會自動開啟。
+
+新格式每批先向相同 webhook 發送無內容的 `content_delivery_probe_v2` 簽章探測，明確確認該批資源及來源／scope／金鑰指紋後才發內容通知；舊 SDK 的一般 200 回應不算支援。兩次 HTTP 都在 SaaS 交易外，各有 2 秒上限，共用既有 3 次嘗試額度。探測只證明接收能力，不預熱、不登記內容，也不授予每日後備豁免。
+
+SDK 只有在版本通知實際處理成功後，才記錄該資源的近期接收證據；來源、金鑰、scope、webhook secret 改變或關閉通知時不沿用。紀錄效期 24 小時，未確認、過期、接收／背景更新失敗或快取紀錄遺失便恢復每日後備資格。四類使用相同規則；低更新頻率下，即使 webhook 仍配置著，也可能因沒有近期證據而每日檢查。這是保守的失效保護，不是永久宣稱通知可用。`smking:doctor --json` 可讀各資源的近期證據／後備原因，不靠訪客探測。
+
+L3 的完整每日巡檢、L4 的首次準備／所有訪客零下載仍未完成。現有每日任務仍只在站台分鐘啟動單批；已有版本通知的 target 仍會要求 GET 版本相符，漏通知後如何安全追上較新版本須在 L3 完成，不能靠刪除版本／撤回屏障來繞過。既有冷頁分支仍可能取得內容。套件不啟動主機 scheduler，客戶仍須自行執行 Laravel scheduler 與背景 worker。正式使用前須完成上述切片及真實主機驗收。
 
 Keep the customer site's `composer.lock` unchanged until that site is ready to
 test this version. SaaS migrations, delivery flags, CDN behavior, and the

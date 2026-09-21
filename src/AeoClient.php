@@ -52,9 +52,19 @@ class AeoClient
             return $this->onDemandAeo('path:'.$path);
         }
 
-        return $this->remember(['path' => $path], function (callable $onTransportFailure) use ($path, $url) {
+        $publication = $this->authoritativePublication(
+            $this->delivery?->publication('aeo', 'path:'.$path),
+        );
+        if ($publication !== null) {
+            return $this->aeoResult($publication);
+        }
+        $response = $this->remember(['path' => $path], function (callable $onTransportFailure) use ($path, $url) {
             return $this->discover(['path' => $path, 'url' => $url], $onTransportFailure);
         });
+        $publication = $this->authoritativePublication(
+            $this->delivery?->publication('aeo', 'path:'.$path),
+        );
+        return $publication !== null ? $this->aeoResult($publication) : $response;
     }
 
     public function forProductId(int $productId): AeoResponse
@@ -66,9 +76,19 @@ class AeoClient
             return $this->onDemandAeo('product_id:'.$productId);
         }
 
-        return $this->remember(['product_id' => $productId], function (callable $onTransportFailure) use ($productId) {
+        $publication = $this->authoritativePublication(
+            $this->delivery?->publication('aeo', 'product_id:'.$productId),
+        );
+        if ($publication !== null) {
+            return $this->aeoResult($publication);
+        }
+        $response = $this->remember(['product_id' => $productId], function (callable $onTransportFailure) use ($productId) {
             return $this->discover(['product_id' => $productId], $onTransportFailure);
         });
+        $publication = $this->authoritativePublication(
+            $this->delivery?->publication('aeo', 'product_id:'.$productId),
+        );
+        return $publication !== null ? $this->aeoResult($publication) : $response;
     }
 
     /**
@@ -96,9 +116,19 @@ class AeoClient
                 : null;
         }
 
-        return $this->rememberMarkdown($path, function () use ($path): array {
+        $publication = $this->authoritativePublication(
+            $this->delivery?->publication('markdown', 'path:'.$path),
+        );
+        if ($publication !== null) {
+            return $publication->snapshot?->payload['document']['body'] ?? null;
+        }
+        $body = $this->rememberMarkdown($path, function () use ($path): array {
             return $this->fetchMarkdown($path);
         });
+        $publication = $this->authoritativePublication(
+            $this->delivery?->publication('markdown', 'path:'.$path),
+        );
+        return $publication !== null ? ($publication->snapshot?->payload['document']['body'] ?? null) : $body;
     }
 
     /**
@@ -1009,20 +1039,40 @@ class AeoClient
         }
         if ($this->usesOnDemandDelivery()) {
             $result = $this->onDemandRead('site-file', 'kind:'.$kind);
-            $document = $result?->snapshot?->payload['document'] ?? null;
-            if (! is_array($document)
-                || ! is_string($document['body'] ?? null)
-                || ! is_string($document['content_type'] ?? null)
-            ) {
-                return null;
-            }
-
-            return [
-                'body' => $document['body'],
-                'contentType' => $document['content_type'],
-            ];
+            return $this->publicFileResult($result);
         }
 
+        $publication = $this->authoritativePublication(
+            $this->delivery?->publication('site-file', 'kind:'.$kind),
+        );
+        if ($publication !== null) {
+            return $this->publicFileResult($publication);
+        }
+        $file = $this->legacyPublicFile($kind);
+        $publication = $this->authoritativePublication(
+            $this->delivery?->publication('site-file', 'kind:'.$kind),
+        );
+        return $publication !== null ? $this->publicFileResult($publication) : $file;
+    }
+
+    /** A pending v2 target without a local body cannot replace legacy content. */
+    private function authoritativePublication(?DeliveryResult $publication): ?DeliveryResult
+    {
+        return $publication?->error === 'target_pending' && $publication->snapshot === null
+            ? null
+            : $publication;
+    }
+
+    private function publicFileResult(?DeliveryResult $result): ?array
+    {
+        $document = $result?->snapshot?->payload['document'] ?? null;
+        return is_array($document) && is_string($document['body'] ?? null) && is_string($document['content_type'] ?? null)
+            ? ['body' => $document['body'], 'contentType' => $document['content_type']]
+            : null;
+    }
+
+    private function legacyPublicFile(string $kind): ?array
+    {
         $apiKey = $this->apiKey();
         if ($apiKey === null || $this->baseUrl() === null) {
             return null;
@@ -1122,7 +1172,11 @@ class AeoClient
 
     private function onDemandAeo(string $identifier): AeoResponse
     {
-        $result = $this->onDemandRead('aeo', $identifier);
+        return $this->aeoResult($this->onDemandRead('aeo', $identifier));
+    }
+
+    private function aeoResult(?DeliveryResult $result): AeoResponse
+    {
         if ($result?->snapshot !== null) {
             return AeoResponse::fromArray($result->snapshot->payload);
         }

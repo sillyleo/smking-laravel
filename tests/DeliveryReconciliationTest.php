@@ -12,6 +12,7 @@ use Illuminate\Filesystem\Filesystem;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Support\Facades\Http;
 use Smking\Laravel\Delivery\DeliveryReconciliation;
+use Smking\Laravel\Delivery\DeliveryNotificationHealth;
 use Smking\Laravel\Delivery\OnDemandDelivery;
 use Smking\Laravel\Delivery\WaitBudget;
 
@@ -102,7 +103,7 @@ class DeliveryReconciliationTest extends TestCase
         $this->assertSame('AEO 2', $delivery->peek('aeo', 'path:/products/article')->snapshot?->payload['summary']);
     }
 
-    public function test_cms_notification_only_skips_cms_daily_reconciliation(): void
+    public function test_notification_switch_without_verified_receipt_does_not_skip_any_resource(): void
     {
         $revision = 1;
         Http::fake(function ($request) use (&$revision) {
@@ -125,11 +126,11 @@ class DeliveryReconciliationTest extends TestCase
         $summary = $reconciliation->runBatch($delivery, 10, 5000);
 
         $this->assertTrue($summary['eligible']);
-        $this->assertSame(1, $summary['checked']);
-        $this->assertSame(1, $summary['refreshed']);
+        $this->assertSame(2, $summary['checked']);
+        $this->assertSame(2, $summary['refreshed']);
         $this->assertNull($summary['error']);
-        Http::assertSentCount(3);
-        $this->assertSame('CMS 1', $delivery->peek('cms-page', 'slug:article')->snapshot?->payload['page']['title']);
+        Http::assertSentCount(4);
+        $this->assertSame('CMS 2', $delivery->peek('cms-page', 'slug:article')->snapshot?->payload['page']['title']);
         $this->assertSame('AEO 2', $delivery->peek('aeo', 'path:/products/article')->snapshot?->payload['summary']);
     }
 
@@ -159,6 +160,28 @@ class DeliveryReconciliationTest extends TestCase
         $summary = $reconciliation->runBatch($delivery, 10, 5000);
         $this->assertSame(1, $summary['checked']);
         Http::assertSentCount(2);
+    }
+
+    public function test_recent_confirmed_resource_skips_but_expiry_restores_daily_check(): void
+    {
+        Http::fake(fn ($request) => str_contains($request->url(), '/cms-page')
+            ? Http::response($this->cmsPayload('article', 'CMS'), 200)
+            : Http::response($this->aeoPayload('/article', 'AEO'), 200));
+        config()->set('smking.delivery.notifications_enabled', true);
+        config()->set('smking.delivery.notifications_scope', str_repeat('d', 64));
+        config()->set('smking.webhook_secret', 'notification-secret');
+        $reconciliation = $this->reconciliation();
+        $delivery = $this->delivery($reconciliation);
+        $this->assertNotNull($delivery->refresh('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
+        $this->assertNotNull($delivery->refresh('aeo', 'path:/article', new WaitBudget(500))->snapshot);
+        $health = new DeliveryNotificationHealth($this->cache, config(), fn () => $this->now);
+        $this->assertTrue($health->record('aeo', true));
+        $minute = $reconciliation->scheduledMinute();
+        $this->now = $this->time(sprintf('2026-09-19 03:%02d:00', $minute));
+        $this->assertSame(1, $reconciliation->runBatch($delivery, 10, 5000)['checked']);
+        $this->now = $this->time(sprintf('2026-09-20 03:%02d:00', $minute));
+        $this->assertSame(2, $reconciliation->runBatch($delivery, 10, 5000)['checked']);
+        Http::assertSentCount(5);
     }
 
     public function test_enabled_notification_without_valid_scope_does_not_disable_cms_check(): void

@@ -241,6 +241,7 @@ final class OnDemandDelivery
                 $cached = $this->cached($resource, $identifier);
                 if ($cached->snapshot?->isFresh(($this->clock)())
                     && $this->matchesTarget($cached->snapshot, $target)
+                    && ! ($this->state($resource, $identifier)['refresh_requested'] ?? false)
                 ) {
                     return $cached;
                 }
@@ -282,6 +283,32 @@ final class OnDemandDelivery
                 : new DeliveryResult(error: 'capacity');
         } catch (Throwable) {
             return new DeliveryResult(error: 'cache_unavailable');
+        }
+    }
+
+    /** Register an unversioned update hint without deleting last-known-good content. */
+    public function requestRefresh(string $resource, string $identifier): bool
+    {
+        if (! $this->configured()
+            || DeliveryIdentifier::parameters($resource, $identifier) === null
+            || ! $this->resourceEnabled($resource)
+        ) {
+            return false;
+        }
+        try {
+            $requested = $this->withLock($this->stateKey($resource, $identifier), function () use ($resource, $identifier): bool {
+                $state = $this->state($resource, $identifier) ?? $this->emptyState($resource, $identifier);
+                // Fence downloads started before this hint, even while the old
+                // body is fresh. The worker clears the hint only on commit.
+                $state['generation'] = bin2hex(random_bytes(16));
+                $state['refresh_requested'] = true;
+
+                return $this->putState($resource, $identifier, $state);
+            });
+
+            return $requested === true && ($this->worklist?->schedule($resource, $identifier) ?? false);
+        } catch (Throwable) {
+            return false;
         }
     }
 
@@ -344,18 +371,11 @@ final class OnDemandDelivery
     /** @return array{format:int,token:string,target:array<string,mixed>,updated_at:int}|null */
     private function targetRecord(string $resource, string $identifier): ?array
     {
-        if ($resource !== 'cms-page') {
-            return null;
-        }
-
-        return $this->targets->read($identifier);
+        return $this->targets->read($identifier, $resource);
     }
 
     public function publication(string $resource, string $identifier): ?DeliveryResult
     {
-        if ($resource !== 'cms-page') {
-            return null;
-        }
         try {
             $record = $this->targetRecord($resource, $identifier);
             if (($record['target']['action'] ?? null) === 'withdraw') {
@@ -412,11 +432,7 @@ final class OnDemandDelivery
         ?string $targetToken,
         callable $operation,
     ): mixed {
-        if ($resource !== 'cms-page') {
-            return $operation();
-        }
-
-        return $this->targets->guard($identifier, $targetToken, $operation);
+        return $this->targets->guard($identifier, $targetToken, $operation, $resource);
     }
 
     private function commit(
@@ -452,6 +468,7 @@ final class OnDemandDelivery
                 $missing = $result->httpStatus === 404;
                 $state['success'] = $missing ? null : $result->snapshot->toCache($this->cacheFormat);
                 $state['missing'] = $missing ? $result->snapshot->toCache($this->cacheFormat) : null;
+                unset($state['refresh_requested']);
                 if (! $this->putState($resource, $identifier, $state)) {
                     return 'cache_unavailable';
                 }
@@ -671,7 +688,8 @@ final class OnDemandDelivery
             return null;
         }
         if (! is_array($state)
-            || count($state) !== 6
+            || count($state) !== (array_key_exists('refresh_requested', $state) ? 7 : 6)
+            || (array_key_exists('refresh_requested', $state) && $state['refresh_requested'] !== true)
             || ($state['format'] ?? null) !== 1
             || ($state['resource'] ?? null) !== $resource
             || ($state['identifier'] ?? null) !== $identifier

@@ -54,7 +54,7 @@ return [
         'work_budget_ms' => env('SMKING_DELIVERY_WORK_BUDGET_MS', 5000),
         'reconcile_items' => env('SMKING_DELIVERY_RECONCILE_ITEMS', 500),
         'heartbeat_seconds' => env('SMKING_DELIVERY_HEARTBEAT_SECONDS', 180),
-        // Versioned CMS targets stay off until SaaS delivery and the exact
+        // Versioned content targets stay off until SaaS delivery and the exact
         // deployment scope have both been prepared. Keep enabled on rollback.
         'notifications_enabled' => env('SMKING_DELIVERY_NOTIFICATIONS_ENABLED', false),
         'notifications_scope' => env('SMKING_DELIVERY_NOTIFICATIONS_SCOPE'),

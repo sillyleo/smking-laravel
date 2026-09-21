@@ -10,7 +10,7 @@ use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Http\JsonResponse;
 use Throwable;
 
-/** Authenticated CMS v2 target registration; it never downloads content. */
+/** Authenticated content target registration; retains the original CMS wire contract. */
 final class CmsDeliveryNotification
 {
     public function __construct(
@@ -19,6 +19,7 @@ final class CmsDeliveryNotification
         private readonly DeliveryWorklist $worklist,
         private readonly OnDemandDelivery $delivery,
         private readonly LegacyCmsCache $legacy,
+        private readonly ?DeliveryNotificationHealth $health = null,
     ) {
     }
 
@@ -47,13 +48,28 @@ final class CmsDeliveryNotification
             }
         }
 
+        if ($payload['kind'] === 'content_delivery_probe_v2') {
+            $work = $this->worklist->status();
+            if (! $work['heartbeat_recent'] || $work['error'] !== null) {
+                return $this->error('background_unavailable', 503);
+            }
+            return response()->json([
+                'ok' => true, 'kind' => $payload['kind'], 'contract' => '2',
+                'deliveryId' => $payload['deliveryId'], 'sourceUrl' => $source,
+                'scope' => $scope, 'keyFingerprint' => hash('sha256', $key),
+                'resources' => $payload['resources'],
+            ])->header('Cache-Control', 'no-store');
+        }
+
         $normalized = [];
         foreach ($payload['targets'] as $candidate) {
             $target = is_array($candidate) ? DeliveryTargetState::normalize($candidate) : null;
-            if ($target === null) {
+            if ($target === null
+                || ($payload['kind'] === 'cms_delivery_v2' && $target['resource'] !== 'cms-page')
+            ) {
                 return $this->error('invalid_notification', 400);
             }
-            $identifier = $target['identifier'];
+            $identifier = $target['resource'].'|'.$target['identifier'];
             if (isset($normalized[$identifier])) {
                 return $this->error('invalid_notification', 400);
             }
@@ -73,18 +89,27 @@ final class CmsDeliveryNotification
                 }
             } elseif ($status !== 'obsolete') {
                 if ($target['action'] === 'withdraw') {
-                    $slug = substr($target['identifier'], 5);
-                    $invalidated = $this->legacy->invalidate($slug)
-                        && $this->delivery->invalidate('cms-page', $target['identifier']);
-                    if ($invalidated) {
-                        $status = 'withdrawn';
+                    // A later publish may already have superseded this withdrawal.
+                    // Never clear its body after releasing the target apply lock.
+                    try {
+                        $invalidated = $this->targets->guard($target['identifier'], $applied['record']['token'], function () use ($target): string {
+                            $legacy = $target['resource'] !== 'cms-page'
+                                || $this->legacy->invalidate(substr($target['identifier'], 5));
+                            return $legacy && $this->delivery->invalidate($target['resource'], $target['identifier'])
+                                ? 'withdrawn' : 'unavailable';
+                        }, $target['resource']);
+                    } catch (Throwable) {
+                        $invalidated = 'unavailable';
+                    }
+                    if ($invalidated === 'withdrawn' || $invalidated === false) {
+                        $status = $invalidated === false ? 'obsolete' : 'withdrawn';
                     } else {
                         $status = 'unavailable';
                         if ($statusCode !== 409) {
                             $statusCode = 503;
                         }
                     }
-                } elseif ($this->worklist->schedule('cms-page', $target['identifier'])) {
+                } elseif ($this->worklist->schedule($target['resource'], $target['identifier'])) {
                     // A normal update keeps the last usable body visible until
                     // the worker validates and atomically commits this target.
                     $status = 'registered';
@@ -98,9 +123,24 @@ final class CmsDeliveryNotification
             $results[] = ['target' => $target, 'status' => $status];
         }
 
+        $resources = [];
+        foreach ($results as $result) {
+            if ($result['status'] === 'obsolete') {
+                continue;
+            }
+            $resource = $result['target']['resource'];
+            $resources[$resource] = ($resources[$resource] ?? true)
+                && in_array($result['status'], ['registered', 'withdrawn', 'current'], true);
+        }
+        foreach ($resources as $resource => $accepted) {
+            if ($this->health !== null && ! $this->health->record($resource, $accepted)) {
+                return $this->error('notification_health_unavailable', 503);
+            }
+        }
+
         return response()->json([
             'ok' => $statusCode === 200,
-            'kind' => 'cms_delivery_v2',
+            'kind' => $payload['kind'],
             'contract' => '2',
             'deliveryId' => $payload['deliveryId'],
             'sourceUrl' => $source,
@@ -116,6 +156,7 @@ final class CmsDeliveryNotification
             return false;
         }
         $keys = array_keys($payload);
+        $probe = ($payload['kind'] ?? null) === 'content_delivery_probe_v2';
         $expected = [
             'contract',
             'deliveredAt',
@@ -124,21 +165,24 @@ final class CmsDeliveryNotification
             'kind',
             'scope',
             'sourceUrl',
-            'targets',
+            $probe ? 'resources' : 'targets',
         ];
         sort($keys);
         sort($expected);
 
         return $keys === $expected
-            && $payload['kind'] === 'cms_delivery_v2'
+            && in_array($payload['kind'], ['cms_delivery_v2', 'content_delivery_v2', 'content_delivery_probe_v2'], true)
             && $payload['contract'] === '2'
             && is_string($payload['deliveryId'])
             && preg_match('/^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/D', $payload['deliveryId']) === 1
             && is_string($payload['deliveredAt'])
-            && is_array($payload['targets'])
-            && array_is_list($payload['targets'])
-            && count($payload['targets']) >= 1
-            && count($payload['targets']) <= 16;
+            && ($probe
+                ? is_array($payload['resources']) && array_is_list($payload['resources'])
+                    && count($payload['resources']) >= 1 && count($payload['resources']) <= 4
+                    && count(array_unique($payload['resources'], SORT_REGULAR)) === count($payload['resources'])
+                    && count(array_filter($payload['resources'], static fn ($resource): bool => in_array($resource, DeliveryNotificationHealth::RESOURCES, true))) === count($payload['resources'])
+                : is_array($payload['targets']) && array_is_list($payload['targets'])
+                    && count($payload['targets']) >= 1 && count($payload['targets']) <= 16);
     }
 
     private function fresh(string $timestamp): bool
