@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.23.0-beta.1 — Durable local delivery candidate (2026-09-22)
+
+This pre-release is only for explicit installation on the isolated leo-test
+host. Existing `^0.22` constraints do not select it, the default remains
+`SMKING_DELIVERY_MODE=legacy`, and installing it does not enable SaaS delivery
+flags, run the customer scheduler, or switch public traffic.
+
 ### Fixed
 - Keep the last successfully validated v2 Blog, AEO, Markdown, and site-file
   content readable while its local cache record exists; source freshness no
