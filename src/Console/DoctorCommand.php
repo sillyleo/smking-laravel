@@ -11,6 +11,8 @@ use Illuminate\Foundation\Http\Kernel as FoundationKernel;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use ReflectionClass;
 use ReflectionException;
+use Smking\Laravel\Delivery\DeliveryReconciliation;
+use Smking\Laravel\Delivery\DeliveryNotificationHealth;
 use Smking\Laravel\Http\Middleware\InjectAeo;
 use Throwable;
 
@@ -29,7 +31,7 @@ class DoctorCommand extends Command
 
     protected $description = 'Verify smking SDK install + connectivity';
 
-    public function handle(Application $app, HttpFactory $http): int
+    public function handle(Application $app, HttpFactory $http, DeliveryReconciliation $reconciliation, DeliveryNotificationHealth $notifications): int
     {
         $checks = [
             $this->checkConfigPublished($app),
@@ -37,8 +39,17 @@ class DoctorCommand extends Command
             $this->checkApiKey(),
             $this->checkBaseUrl(),
             $this->checkMiddlewareInKernel($app),
+            $this->checkDeliveryReconciliation($reconciliation),
             $this->checkApiReachable($http),
         ];
+        if (config('smking.delivery.mode', 'legacy') === 'on_demand') {
+            foreach (DeliveryNotificationHealth::RESOURCES as $resource) {
+                $health = $notifications->status($resource);
+                $checks[] = ['status' => 'info', 'label' => 'Delivery notification '.$resource,
+                    'detail' => $health['available'] ? 'recent scoped receipt; expires within 24 hours'
+                        : 'daily fallback required: '.$health['reason']];
+            }
+        }
 
         $hasFailure = false;
         foreach ($checks as $check) {
@@ -248,6 +259,26 @@ class DoctorCommand extends Command
         }
 
         return ['status' => 'pass', 'label' => 'SMKING_BASE_URL set', 'detail' => $url];
+    }
+
+    /**
+     * @return array{status: 'pass'|'fail'|'info', label: string, detail: string}
+     */
+    private function checkDeliveryReconciliation(DeliveryReconciliation $reconciliation): array
+    {
+        if (config('smking.delivery.mode', 'legacy') !== 'on_demand') {
+            return ['status' => 'info', 'label' => 'Daily delivery reconciliation', 'detail' => 'not required while delivery mode is legacy'];
+        }
+        $status = $reconciliation->status();
+        $detail = sprintf(
+            'round=%s; known=%s; eligible=%s; checked=%d; refreshed=%d; pending=%s; failed=%d; in_flight=%s; last_completed=%s; error=%s. Start 03:%02d, continue each minute until 04:00 in app timezone; verify `php artisan schedule:run`',
+            $status['round_date'] ?? 'none', $status['known'] ?? 'unknown', $status['eligible'] ?? 'unknown',
+            $status['checked'], $status['refreshed'], $status['pending'] ?? 'unknown', $status['failed'],
+            $status['in_flight'] ? 'yes' : 'no', $status['last_completed_on'] ?? 'none',
+            $status['error'] ?? 'none', $status['scheduled_minute'],
+        );
+        return ['status' => $status['complete'] && $status['error'] === null ? 'pass' : 'info',
+            'label' => 'Daily delivery reconciliation', 'detail' => $detail];
     }
 
     /**

@@ -21,8 +21,8 @@ use Smking\Laravel\Support\AeoCacheInvalidator;
  *
  * Substrate-pivot: single endpoint dispatched by `payload.kind`
  * (`"aeo" | "cms_page" | ...`). HMAC-SHA256 verified against
- * `smking.webhook_secret`; on match, evicts the corresponding cache
- * entries so the next page render reads fresh content from SaaS.
+ * `smking.webhook_secret`. Legacy caches retain their eviction contract;
+ * v2 local content is preserved and refreshed by bounded background work.
  *
  * Wire contract — matches the SaaS unified emitter
  * (@smking-saas/features/cms/lib/webhook.ts):
@@ -48,10 +48,10 @@ use Smking\Laravel\Support\AeoCacheInvalidator;
  * (401 `duplicate_delivery`). Payloads from a SaaS predating
  * `deliveryId` skip dedup — the window remains the primary defense.
  *
- * AEO behaviour: `kind=aeo` invalidates the same per-path AEO and Markdown
- * cache entries as `smking:cache:purge`, including failure counters and
- * circuit breakers. The next page request then re-fetches authoritative
- * content from SaaS instead of serving an older ready response until TTL.
+ * `kind=aeo` purges v1 per-path caches but only requests background refresh
+ * for v2 AEO/Markdown. Unversioned hints cannot authorize withdrawal or
+ * establish verified notification capability. Versioned envelopes use the
+ * shared target receiver (original CMS kind or content_delivery_v2).
  */
 class WebhookController
 {
@@ -100,7 +100,7 @@ class WebhookController
 
         // Versioned delivery retries must reach their idempotent target state;
         // do not consume the legacy deliveryId dedup key before registration.
-        if (($payload['kind'] ?? null) === 'cms_delivery_v2') {
+        if (in_array($payload['kind'] ?? null, ['cms_delivery_v2', 'content_delivery_v2', 'content_delivery_probe_v2'], true)) {
             if ($this->deliveryNotification === null) {
                 return response()->json(['ok' => false, 'error' => 'notifications_unavailable'], 503)
                     ->header('Cache-Control', 'no-store');
@@ -162,7 +162,7 @@ class WebhookController
                     $legacy = $this->cmsCache?->invalidate($slug) ?? $this->evictCmsCache($slug);
                     $hasNewState = $this->delivery?->hasState('cms-page', 'slug:'.$slug) ?? false;
                     if (! $legacy
-                        || ($hasNewState && ! ($this->delivery?->invalidate('cms-page', 'slug:'.$slug) ?? false))
+                        || (($hasNewState || $this->onDemand()) && ! ($this->delivery?->requestRefresh('cms-page', 'slug:'.$slug) ?? false))
                     ) {
                         return response()->json(['error' => 'cms_cache_unavailable'], 503);
                     }
@@ -179,7 +179,7 @@ class WebhookController
                     foreach (['aeo', 'markdown'] as $resource) {
                         $identifier = 'path:'.$path;
                         $hasNewState = $this->delivery?->hasState($resource, $identifier) ?? false;
-                        if ($hasNewState && ! ($this->delivery?->invalidate($resource, $identifier) ?? false)) {
+                        if (($hasNewState || $this->onDemand()) && ! ($this->delivery?->requestRefresh($resource, $identifier) ?? false)) {
                             return response()->json(['error' => 'aeo_cache_unavailable'], 503);
                         }
                     }
@@ -205,6 +205,11 @@ class WebhookController
             'kind' => $kind,
             'evicted' => $evicted,
         ]);
+    }
+
+    private function onDemand(): bool
+    {
+        return $this->config->get('smking.delivery.mode', 'legacy') === 'on_demand';
     }
 
     /**

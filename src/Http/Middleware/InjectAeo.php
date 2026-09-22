@@ -82,8 +82,8 @@ class InjectAeo
         // When an autonomous agent / browser-agent / MCP client requests
         // `Accept: text/markdown`, we serve the path's AEO content as a
         // structured markdown document instead of HTML. The forPath() call
-        // above already registered the path for background crawling, so a
-        // first-time miss here recovers on the next request.
+        // above may record a path observation. In on_demand mode, neither
+        // observation nor a visitor miss starts content preparation.
         $flags = (array) $this->config->get('smking.inject', []);
         if (($flags['markdown'] ?? true) && $this->wantsMarkdown($request)) {
             $markdown = $this->client->getMarkdown($path);

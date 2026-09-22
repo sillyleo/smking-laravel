@@ -68,6 +68,20 @@ final class DeliverySnapshot
             return null;
         }
 
+        if (array_key_exists('publication', $delivery)) {
+            $publication = is_array($delivery['publication']) ? DeliveryTargetState::normalize($delivery['publication']) : null;
+            if ($publication === null || $publication['resource'] !== $resource
+                || $publication['identifier'] !== $identifier
+                || $publication['revision'] < 1 || $publication['generation'] !== $publication['revision']
+                || ($status === 'ready'
+                    ? ($publication['action'] !== 'update' || $publication['withdrawalRevision'] >= $publication['revision']
+                        || $publication['contentVersion'] !== $delivery['content_version'])
+                    : $publication['action'] !== 'withdraw')
+            ) {
+                return null;
+            }
+        }
+
         return new self(
             resource: $resource,
             identifier: $identifier,
@@ -97,7 +111,20 @@ final class DeliverySnapshot
         $status = is_array($payload) ? ($payload['status'] ?? null) : null;
         $httpStatus = $status === 'not_found' ? 404 : 200;
 
-        return self::fromResponse($resource, $identifier, $httpStatus, $payload, $nowMs);
+        // The origin freshness window controls background revalidation, not
+        // the lifetime of a validated local result. Both content and a
+        // confirmed missing result remain authoritative until preparation,
+        // reconciliation, or a notification replaces them; visitors never
+        // refresh either state.
+        $validationNow = $nowMs;
+        $usableUntil = self::timestamp(is_array($payload['delivery'] ?? null)
+            ? ($payload['delivery']['usable_until'] ?? null)
+            : null);
+        if ($usableUntil !== null && $usableUntil <= $nowMs) {
+            $validationNow = $usableUntil - 1;
+        }
+
+        return self::fromResponse($resource, $identifier, $httpStatus, $payload, $validationNow);
     }
 
     /**

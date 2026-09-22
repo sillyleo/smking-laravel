@@ -9,6 +9,15 @@ use Smking\Laravel\SmkingServiceProvider;
 
 abstract class TestCase extends Orchestra
 {
+    private ?string $deliveryLocalDirectory = null;
+
+    protected function tearDown(): void
+    {
+        if ($this->deliveryLocalDirectory !== null) {
+            (new \Illuminate\Filesystem\Filesystem())->deleteDirectory($this->deliveryLocalDirectory);
+        }
+        parent::tearDown();
+    }
     /**
      * @return list<class-string>
      */
@@ -19,6 +28,8 @@ abstract class TestCase extends Orchestra
 
     protected function defineEnvironment($app): void
     {
+        $this->deliveryLocalDirectory = sys_get_temp_dir().'/smking-test-local-'.bin2hex(random_bytes(8));
+        $app['config']->set('smking.delivery.local_store_path', $this->deliveryLocalDirectory);
         $app['config']->set('smking.api_key', 'pk_test_key');
         $app['config']->set('smking.base_url', 'https://api.test');
         $app['config']->set('smking.cache.enabled', false);

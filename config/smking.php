@@ -41,6 +41,9 @@ return [
         'mode' => env('SMKING_DELIVERY_MODE', 'legacy'),
         'aeo_enabled' => env('SMKING_DELIVERY_AEO_ENABLED', true),
         'cache_format' => 1,
+        // Private runtime data, NOT a cache directory. Deployments must retain
+        // this path (or mount a shared persistent path on this customer host).
+        'local_store_path' => env('SMKING_DELIVERY_LOCAL_STORE_PATH', storage_path('app/smking-delivery')),
         'page_budget_ms' => env('SMKING_DELIVERY_PAGE_BUDGET_MS', 500),
         'capacity' => env('SMKING_DELIVERY_CAPACITY', 1),
         'lease_seconds' => env('SMKING_DELIVERY_LEASE_SECONDS', 15),
@@ -49,8 +52,9 @@ return [
         'work_items' => env('SMKING_DELIVERY_WORK_ITEMS', 100),
         'work_max_jobs' => env('SMKING_DELIVERY_WORK_MAX_JOBS', 10),
         'work_budget_ms' => env('SMKING_DELIVERY_WORK_BUDGET_MS', 5000),
+        'reconcile_items' => env('SMKING_DELIVERY_RECONCILE_ITEMS', 500),
         'heartbeat_seconds' => env('SMKING_DELIVERY_HEARTBEAT_SECONDS', 180),
-        // Versioned CMS targets stay off until SaaS delivery and the exact
+        // Versioned content targets stay off until SaaS delivery and the exact
         // deployment scope have both been prepared. Keep enabled on rollback.
         'notifications_enabled' => env('SMKING_DELIVERY_NOTIFICATIONS_ENABLED', false),
         'notifications_scope' => env('SMKING_DELIVERY_NOTIFICATIONS_SCOPE'),

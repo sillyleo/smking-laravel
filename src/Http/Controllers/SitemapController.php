@@ -34,6 +34,14 @@ class SitemapController
     {
         $result = $this->client->fetchPublicFile('sitemap');
 
+        if ($result === null && $this->client->isPublicFileConfirmedMissing('sitemap')) {
+            return new Response('', 404, [
+                'Content-Type' => 'application/xml; charset=utf-8',
+                'Cache-Control' => 'no-store',
+                'X-Smking-Status' => 'not_found',
+            ]);
+        }
+
         // Fail mode: cache miss + fetch fail → 503. Empty sitemap 200 would
         // tell Google "site has no URLs" which actively hurts SEO; 503 means
         // "temporary unavailable, retry later" — Google backs off but does

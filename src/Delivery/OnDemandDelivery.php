@@ -18,19 +18,20 @@ use Throwable;
 /**
  * Versioned customer-side content delivery behind one read interface.
  *
- * Reads never wait for locks. Fresh or usable stale content wins; only a cold
- * CMS/site-file read may perform one bounded GET. Explicit refreshes use the
- * same cross-process capacity and preserve the last successful body on error.
+ * Reads only use local content. Explicit preparation and background refreshes
+ * use bounded cross-process capacity and preserve the successful body on error.
  */
 final class OnDemandDelivery
 {
-    private const RETENTION_SECONDS = 604_800;
-
     private const MAX_RESPONSE_BYTES = 10_485_760;
 
     private readonly Closure $clock;
 
     private readonly DeliveryCapacity $capacity;
+
+    private readonly DeliveryLocalStore $local;
+
+    private readonly DeliveryTargetState $targets;
 
     public function __construct(
         private readonly CacheRepository $cache,
@@ -40,48 +41,30 @@ final class OnDemandDelivery
         private readonly int $cacheFormat = DeliverySnapshot::CACHE_FORMAT,
         private readonly ?DeliveryWorklist $worklist = null,
         private readonly ?DeliveryReportOutbox $reports = null,
-        private readonly ?DeliveryTargetState $targets = null,
+        ?DeliveryTargetState $targets = null,
         ?DeliveryCapacity $capacity = null,
+        private readonly ?DeliveryReconciliation $reconciliation = null,
+        ?DeliveryLocalStore $local = null,
     ) {
         $this->clock = $clock ?? static fn (): int => (int) floor(microtime(true) * 1000);
         $this->capacity = $capacity ?? new DeliveryCapacity($cache, $config);
+        $this->local = $local ?? new DeliveryLocalStore((string) $config->get('smking.delivery.local_store_path', storage_path('app/smking-delivery')));
+        $this->targets = $targets ?? new DeliveryTargetState($cache, $config, $this->clock, $this->local);
     }
 
-    public function read(string $resource, string $identifier, WaitBudget $budget): DeliveryResult
+    // Keep the optional legacy argument for callers upgrading in place. Reads
+    // never consume it; only refresh() is permitted to perform content HTTP.
+    public function read(string $resource, string $identifier, ?WaitBudget $budget = null): DeliveryResult
     {
         $cached = $this->peek($resource, $identifier);
-        if ($cached->snapshot !== null) {
-            $this->scheduleBackground($resource, $identifier, $cached);
-
-            return $cached;
-        }
-        if (in_array($cached->error, [
-            'access_denied',
-            'configuration',
-            'disabled',
-            'invalid_identifier',
-            'target_pending',
-            'withdrawn',
-        ], true)) {
-            $this->scheduleBackground($resource, $identifier, $cached);
-
-            return $cached;
+        if ($resource === 'aeo' && $cached->error === 'cache_miss' && str_starts_with($identifier, 'path:')) {
+            // Observation remains separate from content preparation.
+            $this->reports?->observePath(substr($identifier, 5));
         }
         if ($cached->error === 'cache_unavailable') {
             $this->reports?->recordFailure('cache_unavailable');
-
-            return $cached;
         }
-        if (in_array($resource, ['aeo', 'markdown'], true)) {
-            $this->scheduleBackground($resource, $identifier, $cached);
-
-            return $cached;
-        }
-
-        $result = $this->refresh($resource, $identifier, $budget);
-        $this->scheduleBackground($resource, $identifier, $result);
-
-        return $result;
+        return $cached;
     }
 
     /** Local-only read used by preflight and guarded legacy rollback. */
@@ -122,6 +105,82 @@ final class OnDemandDelivery
         }
     }
 
+    /**
+     * Bounded CLI upgrade of an explicitly known v2 identifier, without HTTP.
+     * Import fences before content. Existing durable records always win; this
+     * is not a restore command and never imports PHP legacy SDK objects.
+     */
+    public function importCached(string $resource, string $identifier): DeliveryResult
+    {
+        if ($this->config->get('smking.delivery.mode', 'legacy') !== 'legacy'
+            || ! $this->configured()
+            || DeliveryIdentifier::parameters($resource, $identifier) === null
+        ) {
+            return new DeliveryResult(error: 'configuration');
+        }
+        try {
+            $credential = $this->validateCredential($this->cache->get($this->credentialKey()));
+            if (! $this->importRecord($this->credentialKey(), $credential)) {
+                return new DeliveryResult(error: 'cache_busy');
+            }
+            foreach (['cms-page', 'aeo', 'markdown', 'site-file'] as $kind) {
+                $control = $this->validateControl($this->cache->get($this->controlKey($kind)));
+                if (! $this->importRecord($this->controlKey($kind), $control)) {
+                    return new DeliveryResult(error: 'cache_busy');
+                }
+            }
+            if ($resource === 'cms-page') {
+                // Retain withdrawal fences even when notifications are not yet enabled.
+                if (! $this->targets->importCached($identifier)) {
+                    return new DeliveryResult(error: 'cache_busy');
+                }
+            }
+            $imported = $this->withLock($this->stateKey($resource, $identifier), function () use ($resource, $identifier): bool {
+                if ($this->state($resource, $identifier) !== null) {
+                    return true;
+                }
+                $state = $this->validateState($resource, $identifier, $this->cache->get($this->stateKey($resource, $identifier)));
+                if ($state === null) {
+                    return true;
+                }
+                if ($state['success'] !== null && DeliverySnapshot::fromCache(
+                    $resource, $identifier, $state['success'], ($this->clock)(), $this->cacheFormat,
+                ) === null) {
+                    throw new RuntimeException('delivery_import_invalid');
+                }
+                if ($state['missing'] !== null) {
+                    // Expired missing entries still clear an older success; do
+                    // not import an unvalidated payload as a withdrawal signal.
+                    $at = $state['missing']['payload']['delivery']['validated_at'] ?? null;
+                    $time = is_string($at) ? strtotime($at) : false;
+                    if ($time === false || DeliverySnapshot::fromCache(
+                        $resource, $identifier, $state['missing'], $time * 1000, $this->cacheFormat,
+                    ) === null) {
+                        throw new RuntimeException('delivery_import_invalid');
+                    }
+                }
+
+                return $this->putState($resource, $identifier, $state);
+            });
+            if ($imported !== true) return new DeliveryResult(error: 'cache_busy');
+            $result = $this->peek($resource, $identifier);
+            if ($result->httpStatus === 200 && $result->snapshot !== null && $this->reconciliation !== null
+                && ! $this->reconciliation->remember($result->snapshot, imported: true)
+            ) return new DeliveryResult(error: 'registry_unavailable');
+            return $result;
+        } catch (Throwable) {
+            return new DeliveryResult(error: 'cache_unavailable');
+        }
+    }
+
+    private function importRecord(string $key, ?array $record): bool
+    {
+        if ($record === null) {
+            return true;
+        }
+        return $this->withLock($key, fn (): bool => $this->local->read($key) !== null || $this->put($key, $record)) === true;
+    }
+
     public function refresh(string $resource, string $identifier, WaitBudget $budget): DeliveryResult
     {
         $result = $this->performRefresh($resource, $identifier, $budget);
@@ -130,7 +189,18 @@ final class OnDemandDelivery
         return $result;
     }
 
-    private function performRefresh(string $resource, string $identifier, WaitBudget $budget): DeliveryResult
+    /** Explicit operator preparation must not mistake a fresh local body for a source check. */
+    public function prepare(string $resource, string $identifier, WaitBudget $budget, ?array $expectedPublication = null): DeliveryResult
+    {
+        if ($expectedPublication !== null && (DeliveryTargetState::normalize($expectedPublication) !== $expectedPublication
+            || $expectedPublication['resource'] !== $resource || $expectedPublication['identifier'] !== $identifier)
+        ) return new DeliveryResult(error: 'invalid_input');
+        $result = $this->performRefresh($resource, $identifier, $budget, true, $expectedPublication);
+        $this->reports?->recordFailure($result->error);
+        return $result;
+    }
+
+    private function performRefresh(string $resource, string $identifier, WaitBudget $budget, bool $force = false, ?array $expectedPublication = null): DeliveryResult
     {
         if (! $this->configured()) {
             return new DeliveryResult(error: 'configuration');
@@ -151,7 +221,11 @@ final class OnDemandDelivery
                 return $authority;
             }
             $target = $this->targetRecord($resource, $identifier);
-            if (($target['target']['action'] ?? null) === 'withdraw') {
+            if (($target['target']['action'] ?? null) === 'withdraw'
+                && ! ($force && $expectedPublication !== null && $expectedPublication['action'] === 'update'
+                    && $expectedPublication['revision'] > $target['target']['revision']
+                    && $expectedPublication['withdrawalRevision'] >= $target['target']['withdrawalRevision'])
+            ) {
                 return new DeliveryResult(httpStatus: 404, error: 'withdrawn');
             }
             $targetToken = $target['token'] ?? null;
@@ -162,11 +236,17 @@ final class OnDemandDelivery
                 return new DeliveryResult(error: 'backoff');
             }
 
-            $result = $this->capacity->run($resource, $identifier, function () use ($resource, $identifier, $budget, $target, $targetToken): DeliveryResult {
+            $result = $this->capacity->run($resource, $identifier, function () use ($resource, $identifier, $budget, $target, $targetToken, $force, $expectedPublication): DeliveryResult {
                 $cached = $this->cached($resource, $identifier);
-                if ($cached->snapshot?->isFresh(($this->clock)())
+                if (! $force && $cached->snapshot?->isFresh(($this->clock)())
                     && $this->matchesTarget($cached->snapshot, $target)
+                    && ! ($this->state($resource, $identifier)['refresh_requested'] ?? false)
                 ) {
+                    if ($cached->httpStatus === 200 && $this->reconciliation !== null
+                        && ! $this->reconciliation->remember($cached->snapshot)
+                    ) {
+                        return new DeliveryResult(error: 'registry_unavailable');
+                    }
                     return $cached;
                 }
 
@@ -176,7 +256,7 @@ final class OnDemandDelivery
                         $state = $this->state($resource, $identifier) ?? $this->emptyState($resource, $identifier);
                         $state['generation'] = $generation;
 
-                        return $this->put($this->stateKey($resource, $identifier), $state);
+                        return $this->putState($resource, $identifier, $state);
                     });
                 });
                 if ($prepared !== true) {
@@ -191,6 +271,29 @@ final class OnDemandDelivery
                     $this->recordControlFailure($resource, $fetched);
 
                     return $fetched;
+                }
+                $publication = $fetched->snapshot->payload['delivery']['publication'] ?? null;
+                if ($publication !== null) {
+                    // Adopt only source-paired ordering evidence, never just a
+                    // different hash or a newer validation timestamp. A webhook
+                    // received during this GET wins, even if the GET looks newer.
+                    $accepted = $this->targets->applyFetched($publication, $targetToken);
+                    if (! in_array($accepted['status'], ['applied', 'duplicate'], true)) {
+                        return new DeliveryResult(error: match ($accepted['status']) {
+                            'superseded' => 'superseded',
+                            'unavailable' => 'cache_unavailable',
+                            default => 'target_mismatch',
+                        });
+                    }
+                    $target = $accepted['record'];
+                    $targetToken = $target['token'];
+                }
+                if ($expectedPublication !== null && (! is_array($publication)
+                    || DeliveryTargetState::normalize($publication) !== $expectedPublication)
+                ) {
+                    // A real newer withdrawal fence still wins above. An unpaired
+                    // or unexpected response must never count as this release.
+                    return new DeliveryResult(error: 'publication_mismatch');
                 }
                 if (! $this->matchesTarget($fetched->snapshot, $target)) {
                     $mismatch = new DeliveryResult(httpStatus: $fetched->httpStatus, error: 'target_mismatch');
@@ -210,6 +313,32 @@ final class OnDemandDelivery
         }
     }
 
+    /** Register an unversioned update hint without deleting last-known-good content. */
+    public function requestRefresh(string $resource, string $identifier): bool
+    {
+        if (! $this->configured()
+            || DeliveryIdentifier::parameters($resource, $identifier) === null
+            || ! $this->resourceEnabled($resource)
+        ) {
+            return false;
+        }
+        try {
+            $requested = $this->withLock($this->stateKey($resource, $identifier), function () use ($resource, $identifier): bool {
+                $state = $this->state($resource, $identifier) ?? $this->emptyState($resource, $identifier);
+                // Fence downloads started before this hint, even while the old
+                // body is fresh. The worker clears the hint only on commit.
+                $state['generation'] = bin2hex(random_bytes(16));
+                $state['refresh_requested'] = true;
+
+                return $this->putState($resource, $identifier, $state);
+            });
+
+            return $requested === true && ($this->worklist?->schedule($resource, $identifier) ?? false);
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
     /** Prevent an in-flight response from repopulating an invalidated key. */
     public function invalidate(string $resource, string $identifier): bool
     {
@@ -221,9 +350,14 @@ final class OnDemandDelivery
         }
 
         try {
-            return $this->withLock($this->stateKey($resource, $identifier), function () use ($resource, $identifier): bool {
-                return $this->put($this->stateKey($resource, $identifier), $this->emptyState($resource, $identifier));
+            $invalidated = $this->withLock($this->stateKey($resource, $identifier), function () use ($resource, $identifier): bool {
+                return $this->putState($resource, $identifier, $this->emptyState($resource, $identifier));
             }) === true;
+            if ($invalidated) {
+                $this->reconciliation?->forget($resource, $identifier);
+            }
+
+            return $invalidated;
         } catch (Throwable) {
             return false;
         }
@@ -260,18 +394,11 @@ final class OnDemandDelivery
     /** @return array{format:int,token:string,target:array<string,mixed>,updated_at:int}|null */
     private function targetRecord(string $resource, string $identifier): ?array
     {
-        if ($resource !== 'cms-page' || $this->targets === null || ! $this->targets->enabled()) {
-            return null;
-        }
-
-        return $this->targets->read($identifier);
+        return $this->targets->read($identifier, $resource);
     }
 
     public function publication(string $resource, string $identifier): ?DeliveryResult
     {
-        if ($resource !== 'cms-page' || $this->targets === null || ! $this->targets->enabled()) {
-            return null;
-        }
         try {
             $record = $this->targetRecord($resource, $identifier);
             if (($record['target']['action'] ?? null) === 'withdraw') {
@@ -303,6 +430,15 @@ final class OnDemandDelivery
                 return $cached;
             }
 
+            // A newer publication may reveal a missed withdrawal. Old bodies
+            // must not reappear if persisting the replacement then fails.
+            $bodyRevision = $cached->snapshot->payload['delivery']['publication']['revision'] ?? 0;
+            if ($record['target']['withdrawalRevision'] > 0
+                && $bodyRevision <= $record['target']['withdrawalRevision']
+            ) {
+                return new DeliveryResult(error: 'target_pending', refreshRequired: true);
+            }
+
             return new DeliveryResult(
                 snapshot: $cached->snapshot,
                 httpStatus: $cached->httpStatus,
@@ -319,7 +455,10 @@ final class OnDemandDelivery
     {
         return $target === null
             || ($target['target']['action'] === 'update'
-                && ($snapshot->payload['delivery']['content_version'] ?? null) === $target['target']['contentVersion']);
+                && ($snapshot->payload['delivery']['content_version'] ?? null) === $target['target']['contentVersion'])
+            || ($target['target']['action'] === 'withdraw'
+                && ($snapshot->payload['status'] ?? null) === 'not_found'
+                && DeliveryTargetState::normalize($snapshot->payload['delivery']['publication'] ?? []) === $target['target']);
     }
 
     private function guardTarget(
@@ -328,11 +467,7 @@ final class OnDemandDelivery
         ?string $targetToken,
         callable $operation,
     ): mixed {
-        if ($resource !== 'cms-page' || $this->targets === null || ! $this->targets->enabled()) {
-            return $operation();
-        }
-
-        return $this->targets->guard($identifier, $targetToken, $operation);
+        return $this->targets->guard($identifier, $targetToken, $operation, $resource);
     }
 
     private function commit(
@@ -366,9 +501,15 @@ final class OnDemandDelivery
                 }
 
                 $missing = $result->httpStatus === 404;
+                if (! $missing && $this->reconciliation !== null
+                    && ! $this->reconciliation->remember($result->snapshot)
+                ) {
+                    return 'registry_unavailable';
+                }
                 $state['success'] = $missing ? null : $result->snapshot->toCache($this->cacheFormat);
                 $state['missing'] = $missing ? $result->snapshot->toCache($this->cacheFormat) : null;
-                if (! $this->put($this->stateKey($resource, $identifier), $state)) {
+                unset($state['refresh_requested']);
+                if (! $this->putState($resource, $identifier, $state)) {
                     return 'cache_unavailable';
                 }
                 $this->writeControl($resource, denied: false, status: null, circuitUntil: 0);
@@ -377,9 +518,15 @@ final class OnDemandDelivery
             });
         });
 
-        return $committed === 'committed'
-            ? $result
-            : new DeliveryResult(error: $committed === false
+        if ($committed === 'committed') {
+            if ($result->httpStatus === 404) {
+                $this->reconciliation?->forget($resource, $identifier);
+            }
+
+            return $result;
+        }
+
+        return new DeliveryResult(error: $committed === false
                 ? 'superseded'
                 : (is_string($committed) ? $committed : 'cache_busy'));
     }
@@ -428,10 +575,12 @@ final class OnDemandDelivery
         }
 
         if (! in_array($response->status(), [200, 404], true)) {
+            $denialScope = $this->denialScope($response);
+
             return new DeliveryResult(
                 httpStatus: $response->status(),
-                error: in_array($response->status(), [401, 403], true) ? 'access_denied' : 'upstream',
-                denialScope: $this->denialScope($response),
+                error: $denialScope === null ? 'upstream' : 'access_denied',
+                denialScope: $denialScope,
             );
         }
         if ($this->mediaType($response) !== 'application/json'
@@ -455,7 +604,7 @@ final class OnDemandDelivery
 
     private function recordControlFailure(string $resource, DeliveryResult $result): void
     {
-        if ($result->httpStatus === 401 || $result->denialScope === 'site') {
+        if ($result->error === 'access_denied' && $result->denialScope === 'site') {
             if (! $this->put($this->credentialKey(), [
                 'format' => 1,
                 'denied' => true,
@@ -466,11 +615,12 @@ final class OnDemandDelivery
 
             return;
         }
-        if ($result->httpStatus === 403) {
+        if ($result->error === 'access_denied'
+            && in_array($result->denialScope, ['aeo', 'cms'], true)
+        ) {
             $resources = match ($result->denialScope) {
                 'aeo' => ['aeo', 'markdown', 'site-file'],
                 'cms' => ['cms-page'],
-                default => [$resource],
             };
             foreach ($resources as $deniedResource) {
                 $this->writeControl($deniedResource, denied: true, status: 403, circuitUntil: 0);
@@ -490,7 +640,20 @@ final class OnDemandDelivery
 
     private function authority(string $resource): ?DeliveryResult
     {
-        $credential = $this->cache->get($this->credentialKey());
+        $credential = $this->validateCredential($this->local->read($this->credentialKey()));
+        if (($credential['denied'] ?? false) === true) {
+            return new DeliveryResult(httpStatus: (int) $credential['status'], error: 'access_denied');
+        }
+        $control = $this->control($resource);
+        if (($control['denied'] ?? false) === true) {
+            return new DeliveryResult(httpStatus: (int) $control['status'], error: 'access_denied');
+        }
+
+        return null;
+    }
+
+    private function validateCredential(mixed $credential): ?array
+    {
         if ($credential !== null) {
             if (! is_array($credential)
                 || ($credential['format'] ?? null) !== 1
@@ -501,17 +664,8 @@ final class OnDemandDelivery
             ) {
                 throw new RuntimeException('delivery_credential_invalid');
             }
-            if ($credential['denied'] === true) {
-                return new DeliveryResult(httpStatus: (int) $credential['status'], error: 'access_denied');
-            }
         }
-
-        $control = $this->control($resource);
-        if (($control['denied'] ?? false) === true) {
-            return new DeliveryResult(httpStatus: (int) $control['status'], error: 'access_denied');
-        }
-
-        return null;
+        return $credential;
     }
 
     /**
@@ -519,7 +673,11 @@ final class OnDemandDelivery
      */
     private function control(string $resource): ?array
     {
-        $control = $this->cache->get($this->controlKey($resource));
+        return $this->validateControl($this->local->read($this->controlKey($resource)));
+    }
+
+    private function validateControl(mixed $control): ?array
+    {
         if ($control === null) {
             return null;
         }
@@ -562,17 +720,26 @@ final class OnDemandDelivery
      */
     private function state(string $resource, string $identifier): ?array
     {
-        $state = $this->cache->get($this->stateKey($resource, $identifier));
+        return $this->validateState($resource, $identifier, $this->local->read($this->stateKey($resource, $identifier)));
+    }
+
+    private function validateState(string $resource, string $identifier, mixed $state): ?array
+    {
         if ($state === null) {
             return null;
         }
         if (! is_array($state)
+            || count($state) !== (array_key_exists('refresh_requested', $state) ? 7 : 6)
+            || (array_key_exists('refresh_requested', $state) && $state['refresh_requested'] !== true)
             || ($state['format'] ?? null) !== 1
             || ($state['resource'] ?? null) !== $resource
             || ($state['identifier'] ?? null) !== $identifier
             || ! is_string($state['generation'] ?? null)
             || ! array_key_exists('success', $state)
             || ! array_key_exists('missing', $state)
+            || ($state['success'] !== null && (! is_array($state['success']) || ($state['success']['payload']['status'] ?? null) !== 'ready'))
+            || ($state['missing'] !== null && (! is_array($state['missing']) || ($state['missing']['payload']['status'] ?? null) !== 'not_found'))
+            || ($state['success'] !== null && $state['missing'] !== null)
         ) {
             throw new RuntimeException('delivery_state_invalid');
         }
@@ -597,15 +764,7 @@ final class OnDemandDelivery
 
     private function withLock(string $key, callable $operation): mixed
     {
-        $lock = $this->cache->lock($key.':mutex', 5);
-        if (! $lock->get()) {
-            return null;
-        }
-        try {
-            return $operation();
-        } finally {
-            $lock->release();
-        }
+        return $this->local->locked($key, $operation);
     }
 
     private function resourceEnabled(string $resource): bool
@@ -619,34 +778,6 @@ final class OnDemandDelivery
         return $this->config->get('smking.cache.enabled', true) === true
             && $this->cacheFormat >= 1
             && $this->cacheFormat <= 100;
-    }
-
-    private function scheduleBackground(string $resource, string $identifier, DeliveryResult $result): void
-    {
-        if ($resource === 'aeo'
-            && $result->error === 'cache_miss'
-            && str_starts_with($identifier, 'path:')
-        ) {
-            $this->reports?->observePath(substr($identifier, 5));
-        }
-        if ($result->refreshRequired
-            || in_array($result->error, [
-                'backoff',
-                'budget_exhausted',
-                'cache_busy',
-                'cache_miss',
-                'cache_unavailable',
-                'capacity',
-                'invalid_response',
-                'superseded',
-                'target_mismatch',
-                'target_pending',
-                'transport',
-                'upstream',
-            ], true)
-        ) {
-            $this->worklist?->schedule($resource, $identifier);
-        }
     }
 
     private function validConfiguration(string $baseUrl, string $apiKey): bool
@@ -684,7 +815,9 @@ final class OnDemandDelivery
 
     private function denialScope(Response $response): ?string
     {
-        if ($response->status() !== 403
+        // Only the exact v2 source contract may create a durable authority
+        // barrier. Proxy/WAF 401 or 403 pages are ordinary upstream failures.
+        if (! in_array($response->status(), [401, 403], true)
             || strlen($response->body()) > 8192
             || $this->mediaType($response) !== 'application/json'
         ) {
@@ -695,8 +828,22 @@ final class OnDemandDelivery
         if (! is_array($payload)) {
             return null;
         }
+        $keys = array_keys($payload);
+        sort($keys);
+        if ($response->status() === 401) {
+            return $keys === ['error', 'status']
+                && ($payload['status'] ?? null) === 'unavailable'
+                && ($payload['error'] ?? null) === 'invalid_key'
+                    ? 'site'
+                    : null;
+        }
+
         $scope = is_array($payload['denial'] ?? null) ? ($payload['denial']['scope'] ?? null) : null;
-        if (($payload['status'] ?? null) !== 'unavailable'
+        $denialKeys = is_array($payload['denial'] ?? null) ? array_keys($payload['denial']) : [];
+        sort($denialKeys);
+        if ($keys !== ['denial', 'error', 'status']
+            || $denialKeys !== ['contract', 'scope']
+            || ($payload['status'] ?? null) !== 'unavailable'
             || ! is_array($payload['denial'] ?? null)
             || ($payload['denial']['contract'] ?? null) !== '2'
             || ! in_array($scope, ['site', 'aeo', 'cms'], true)
@@ -735,7 +882,12 @@ final class OnDemandDelivery
 
     private function put(string $key, array $value): bool
     {
-        return $this->cache->put($key, $value, self::RETENTION_SECONDS) === true;
+        return $this->local->write($key, $value);
+    }
+
+    private function putState(string $resource, string $identifier, array $state): bool
+    {
+        return $this->put($this->stateKey($resource, $identifier), $state);
     }
 
     private function rootKey(): string

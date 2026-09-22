@@ -28,6 +28,8 @@ final class DeliveryWorklist
 
     private readonly Closure $clock;
 
+    private readonly DeliveryNotificationHealth $notifications;
+
     public function __construct(
         private readonly CacheRepository $cache,
         private readonly ConfigRepository $config,
@@ -36,6 +38,7 @@ final class DeliveryWorklist
         private readonly int $heartbeatSeconds = 180,
     ) {
         $this->clock = $clock ?? static fn (): int => (int) floor(microtime(true) * 1000);
+        $this->notifications = new DeliveryNotificationHealth($cache, $config, $this->clock);
     }
 
     public function prepare(): bool
@@ -80,7 +83,16 @@ final class DeliveryWorklist
 
                 $key = hash('sha256', $resource.'|'.$identifier);
                 if (isset($record['items'][$key])) {
-                    return $record['items'][$key]['attempts'] < self::MAX_ATTEMPTS;
+                    if ($record['items'][$key]['attempts'] >= self::MAX_ATTEMPTS) {
+                        return false;
+                    }
+                    if ($record['items'][$key]['claim'] !== null) {
+                        // A registration racing with successful completion must
+                        // survive that completion, without renewing retry limits.
+                        $record['items'][$key]['rescheduled'] = true;
+                        $this->save($record);
+                    }
+                    return true;
                 }
                 if (count($record['items']) >= $this->maxItems) {
                     $this->drop($record, 'overflow');
@@ -141,6 +153,9 @@ final class DeliveryWorklist
                 $result = $delivery->refresh($item['resource'], $item['identifier'], $budget);
                 $complete = $result->snapshot !== null
                     || in_array($result->error, ['access_denied', 'disabled', 'invalid_identifier', 'withdrawn'], true);
+                if (! $complete) {
+                    $this->notifications->record($item['resource'], false);
+                }
                 if (! $this->finish($item, $complete ? null : ($result->error ?? 'unknown'))) {
                     throw new RuntimeException('delivery_work_ack_failed');
                 }
@@ -217,6 +232,7 @@ final class DeliveryWorklist
                 $item['attempts']++;
                 $item['claim'] = bin2hex(random_bytes(16));
                 $item['lease_until'] = $now + self::CLAIM_LIFETIME_MS;
+                unset($item['rescheduled']);
                 $record['items'][$key] = $item;
                 $this->save($record);
 
@@ -240,13 +256,14 @@ final class DeliveryWorklist
             ) {
                 return true;
             }
-            if ($error === null) {
+            if ($error === null && ! ($item['rescheduled'] ?? false)) {
                 unset($record['items'][$key]);
             } else {
+                unset($item['rescheduled']);
                 $item['claim'] = null;
                 $item['lease_until'] = 0;
                 $item['last_error'] = $error;
-                $delay = min(300, 30 * (2 ** max(0, $item['attempts'] - 1)));
+                $delay = $error === null ? 0 : min(300, 30 * (2 ** max(0, $item['attempts'] - 1)));
                 $item['next_at'] = ($this->clock)() + $delay * 1000;
                 $record['items'][$key] = $item;
             }
@@ -308,6 +325,7 @@ final class DeliveryWorklist
                 || ($item['claim'] !== null && preg_match('/^[a-f0-9]{32}$/D', $item['claim']) !== 1)
                 || ! array_key_exists('last_error', $item)
                 || ($item['last_error'] !== null && ! is_string($item['last_error']))
+                || (array_key_exists('rescheduled', $item) && $item['rescheduled'] !== true)
             ) {
                 throw new RuntimeException('delivery_worklist_item_invalid');
             }

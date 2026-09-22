@@ -9,6 +9,9 @@ use Illuminate\Support\Facades\Http;
 use Smking\Laravel\CmsClient;
 use Smking\Laravel\Console\DeliveryPrewarmCommand;
 use Smking\Laravel\Delivery\OnDemandDelivery;
+use Smking\Laravel\Delivery\DeliveryReconciliation;
+use Smking\Laravel\Delivery\DeliveryTargetState;
+use Smking\Laravel\Delivery\WaitBudget;
 use Symfony\Component\Console\Tester\CommandTester;
 
 class DeliveryPrewarmTest extends TestCase
@@ -123,9 +126,195 @@ class DeliveryPrewarmTest extends TestCase
         Http::assertSentCount(2);
     }
 
+    public function test_explicit_prewarm_can_prepare_new_content_after_mode_switch_without_notifications(): void
+    {
+        config()->set('smking.delivery.mode', 'on_demand');
+        config()->set('smking.delivery.notifications_enabled', false);
+        config()->set('smking.delivery.notifications_scope', null);
+        Http::preventStrayRequests();
+        Http::fake(fn ($request) => Http::response($this->payload($request['slug']), 200));
+        $this->artisan('smking:delivery:work', ['--prepare' => true])->assertExitCode(0);
+        $this->artisan('smking:delivery:report', ['--prepare' => true])->assertExitCode(0);
+
+        [$exit, $summary] = $this->prewarm(['--slug' => ['new-article']]);
+        $this->assertSame(0, $exit, json_encode($summary));
+        $this->assertTrue($this->app->make(CmsClient::class)->forSlug('new-article')->isReady());
+        $this->assertSame('on_demand', config('smking.delivery.mode'));
+        Http::assertSentCount(1);
+    }
+
+    public function test_local_readiness_does_not_expire_a_valid_last_known_good_copy(): void
+    {
+        $past = (int) floor(microtime(true) * 1000) - 30 * 86400000;
+        Http::preventStrayRequests();
+        Http::fake(fn () => Http::response($this->payload('article', $past), 200));
+        $delivery = new OnDemandDelivery($this->app->make('cache')->store('prewarm_test'),
+            $this->app->make(\Illuminate\Http\Client\Factory::class), config(), clock: fn () => $past,
+            reconciliation: $this->app->make(DeliveryReconciliation::class));
+        $this->assertNotNull($delivery->refresh('cms-page', 'slug:article', new WaitBudget(500))->snapshot);
+        $this->artisan('smking:delivery:work', ['--prepare' => true])->assertExitCode(0);
+        $this->artisan('smking:delivery:report', ['--prepare' => true])->assertExitCode(0);
+
+        [$exit, $summary] = $this->prewarm(['--slug' => ['article'], '--check' => true]);
+        $this->assertSame(0, $exit, json_encode($summary));
+        Http::assertSentCount(1);
+    }
+
+    public function test_explicit_preparation_rechecks_source_even_when_restored_content_is_fresh(): void
+    {
+        $available = true;
+        Http::preventStrayRequests();
+        Http::fake(function () use (&$available) {
+            return $available ? Http::response($this->payload('article'), 200) : Http::response(['error' => 'unavailable'], 503);
+        });
+        $this->artisan('smking:delivery:work', ['--prepare' => true])->assertExitCode(0);
+        $this->artisan('smking:delivery:report', ['--prepare' => true])->assertExitCode(0);
+        $this->assertSame(0, $this->prewarm(['--slug' => ['article']])[0]);
+        $available = false;
+
+        [$exit, $summary] = $this->prewarm(['--slug' => ['article']]);
+        $this->assertSame(1, $exit, json_encode($summary));
+        Http::assertSentCount(2);
+        $this->assertNotNull($this->app->make(OnDemandDelivery::class)->peek('cms-page', 'slug:article')->snapshot);
+    }
+
+    public function test_readiness_does_not_claim_the_new_version_is_ready_while_old_content_is_served(): void
+    {
+        Http::preventStrayRequests();
+        Http::fake(fn () => Http::response($this->payload('article'), 200));
+        $this->artisan('smking:delivery:work', ['--prepare' => true])->assertExitCode(0);
+        $this->artisan('smking:delivery:report', ['--prepare' => true])->assertExitCode(0);
+        $this->assertSame(0, $this->prewarm(['--slug' => ['article']])[0]);
+        $this->app->make(DeliveryTargetState::class)->apply([
+            'resource' => 'cms-page', 'identifier' => 'slug:article', 'action' => 'update',
+            'revision' => 2, 'generation' => 2, 'withdrawalRevision' => 0,
+            'contentVersion' => 'sha256:'.hash('sha256', 'new version'),
+        ]);
+        [$exit, $summary] = $this->prewarm(['--slug' => ['article'], '--check' => true]);
+        $this->assertSame(1, $exit, json_encode($summary));
+        $this->assertSame(0, $summary['ready']);
+        Http::assertSentCount(1);
+    }
+
+    public function test_all_four_resources_can_be_prepared_and_checked_without_visitors_or_notifications(): void
+    {
+        config()->set('smking.delivery.aeo_enabled', true);
+        config()->set('smking.delivery.notifications_enabled', false);
+        config()->set('smking.delivery.notifications_scope', null);
+        Http::preventStrayRequests();
+        Http::fake(function ($request) {
+            $resource = basename(parse_url($request->url(), PHP_URL_PATH));
+            $payload = $this->payload($request['slug'] ?? '');
+            if ($resource !== 'cms-page') unset($payload['page']);
+            $payload += match ($resource) {
+                'cms-page' => [],
+                'aeo' => ['jsonLd' => ['@type' => 'Product']],
+                'markdown' => ['document' => ['path' => $request['path'], 'body' => '# Prepared', 'content_type' => 'text/markdown; charset=utf-8']],
+                'site-file' => ['document' => ['kind' => $request['kind'], 'body' => 'Prepared', 'content_type' => 'text/plain; charset=utf-8']],
+            };
+            return Http::response($payload, 200);
+        });
+        $this->artisan('smking:delivery:work', ['--prepare' => true])->assertExitCode(0);
+        $this->artisan('smking:delivery:report', ['--prepare' => true])->assertExitCode(0);
+        $selection = ['cms-page' => 'slug:article', 'aeo' => 'path:/article', 'markdown' => 'path:/article', 'site-file' => 'kind:robots'];
+        foreach ($selection as $resource => $identifier) {
+            [$exit, $summary] = $this->prewarm(['--resource' => $resource, '--identifier' => [$identifier]]);
+            $this->assertSame(0, $exit, json_encode($summary));
+            $this->assertSame(1, $summary['ready']);
+            $this->assertSame($resource, $summary['items'][0]['resource']);
+            $this->assertSame($identifier, $summary['items'][0]['identifier']);
+        }
+        $before = $this->persistentHashes();
+        foreach ($selection as $resource => $identifier) {
+            [$exit, $summary] = $this->prewarm(['--resource' => $resource, '--identifier' => [$identifier], '--check' => true]);
+            $this->assertSame(0, $exit);
+            $this->assertSame(0, $summary['processed']);
+        }
+        $this->assertSame($before, $this->persistentHashes());
+        $this->assertSame(4, $this->app->make(DeliveryReconciliation::class)->status()['known']);
+        $this->assertSame('legacy', config('smking.delivery.mode'));
+        Http::assertSentCount(4);
+    }
+
+    public function test_ambiguous_unknown_or_invalid_identifier_selection_is_rejected_before_io(): void
+    {
+        Http::preventStrayRequests();
+        Http::fake();
+        foreach ([
+            ['--slug' => ['article'], '--resource' => 'cms-page', '--identifier' => ['slug:article']],
+            ['--resource' => 'unknown', '--identifier' => ['slug:article']],
+            ['--resource' => 'aeo', '--identifier' => ['path://foreign.test/private']],
+            ['--resource' => 'cms-page', '--identifier' => ['slug:article', 'slug:../draft']],
+            ['--resource' => 'site-file', '--identifier' => ['kind:unsupported']],
+            ['--resource' => 'cms-page', '--identifier' => ['slug:1', 'slug:2', 'slug:3', 'slug:4']],
+        ] as $parameters) {
+            [$exit, $summary] = $this->prewarm($parameters);
+            $this->assertSame(1, $exit);
+            $this->assertSame('invalid_input', $summary['error']);
+        }
+        $this->assertDirectoryDoesNotExist(config('smking.delivery.local_store_path'));
+        Http::assertNothingSent();
+    }
+
+    public function test_readiness_refuses_a_missing_index_even_when_content_is_readable(): void
+    {
+        Http::fake(fn () => Http::response($this->payload('article'), 200));
+        $this->artisan('smking:delivery:work', ['--prepare' => true])->assertExitCode(0);
+        $this->artisan('smking:delivery:report', ['--prepare' => true])->assertExitCode(0);
+        $this->assertSame(0, $this->prewarm(['--slug' => ['article']])[0]);
+        $key = 'smking:delivery:v2:reconciliation:'.substr(hash('sha256', 'pk_test_key|https://api.test'), 0, 24);
+        unlink(config('smking.delivery.local_store_path').'/'.hash('sha256', $key).'.json');
+        $before = $this->persistentHashes();
+        [$exit, $summary] = $this->prewarm(['--slug' => ['article'], '--check' => true]);
+        $this->assertSame(1, $exit);
+        $this->assertSame('registry_not_ready', $summary['items'][0]['state']);
+        $this->assertSame($before, $this->persistentHashes());
+        $this->assertNotNull($this->app->make(OnDemandDelivery::class)->peek('cms-page', 'slug:article')->snapshot);
+        Http::assertSentCount(1);
+    }
+
+    public function test_readiness_refuses_draft_response_and_does_not_create_published_content(): void
+    {
+        Http::fake(fn () => Http::response($this->payload('article') + ['preview' => true], 200));
+        $this->artisan('smking:delivery:work', ['--prepare' => true])->assertExitCode(0);
+        $this->artisan('smking:delivery:report', ['--prepare' => true])->assertExitCode(0);
+        [$exit, $summary] = $this->prewarm(['--slug' => ['article']]);
+        $this->assertSame(1, $exit);
+        $this->assertSame(0, $summary['ready']);
+        $this->assertNull($this->app->make(OnDemandDelivery::class)->peek('cms-page', 'slug:article')->snapshot);
+        Http::assertSentCount(1);
+    }
+
+    public function test_paused_aeo_cannot_be_reported_prepared_while_blog_still_can(): void
+    {
+        Http::fake(fn () => Http::response($this->payload('article'), 200));
+        $this->artisan('smking:delivery:work', ['--prepare' => true])->assertExitCode(0);
+        $this->artisan('smking:delivery:report', ['--prepare' => true])->assertExitCode(0);
+        foreach (['aeo' => 'path:/article', 'markdown' => 'path:/article', 'site-file' => 'kind:robots'] as $resource => $identifier) {
+            [$exit, $summary] = $this->prewarm(['--resource' => $resource, '--identifier' => [$identifier]]);
+            $this->assertSame(1, $exit);
+            $this->assertSame('disabled', $summary['error']);
+        }
+        $this->assertSame(0, $this->prewarm(['--slug' => ['article']])[0]);
+        Http::assertSentCount(1);
+    }
+
+    private function persistentHashes(): array
+    {
+        $hashes = [];
+        foreach ((new Filesystem())->allFiles(config('smking.delivery.local_store_path')) as $file) {
+            $hashes[$file->getFilename()] = hash_file('sha256', $file->getPathname());
+        }
+        ksort($hashes);
+        return $hashes;
+    }
+
     /** @return array{int, ?array<string, mixed>} */
     private function prewarm(array $parameters): array
     {
+        // Laravel 10 leaves PendingCommand's mocked OutputStyle binding behind.
+        // CommandTester must receive the real output, not that earlier mock.
+        $this->app->offsetUnset(\Illuminate\Console\OutputStyle::class);
         $command = new DeliveryPrewarmCommand();
         $command->setLaravel($this->app);
         $tester = new CommandTester($command);
@@ -137,9 +326,9 @@ class DeliveryPrewarmTest extends TestCase
     }
 
     /** @return array<string, mixed> */
-    private function payload(string $slug): array
+    private function payload(string $slug, ?int $now = null): array
     {
-        $now = (int) floor(microtime(true) * 1000);
+        $now ??= (int) floor(microtime(true) * 1000);
         $iso = static fn (int $milliseconds): string => gmdate('Y-m-d\TH:i:s', intdiv($milliseconds, 1000))
             .sprintf('.%03dZ', $milliseconds % 1000);
 

@@ -77,7 +77,7 @@ class DeliveryBackgroundWorkTest extends TestCase
         Http::assertNothingSent();
     }
 
-    public function test_cold_aeo_is_local_until_one_bounded_cli_worker_tick(): void
+    public function test_cold_aeo_requires_explicit_preparation_before_a_worker_can_fetch(): void
     {
         Http::fake([
             '*' => Http::response($this->aeoPayload('/products/article'), 200, ['Content-Type' => 'application/json']),
@@ -91,8 +91,11 @@ class DeliveryBackgroundWorkTest extends TestCase
         Http::assertNothingSent();
 
         $work = $this->app->make(DeliveryWorklist::class);
-        $this->assertSame(1, $work->status()['counts']['pending']);
+        $this->assertSame(0, $work->status()['counts']['pending']);
         $this->assertSame(1, $this->app->make(\Smking\Laravel\Delivery\DeliveryReportOutbox::class)->status()['pending_observations']);
+
+        // Only an explicit publisher/operator action creates content work.
+        $this->assertTrue($work->schedule('aeo', 'path:/products/article'));
 
         $exit = $this->artisan('smking:delivery:work')->run();
         $this->assertSame(0, $exit, json_encode($work->status(), JSON_UNESCAPED_UNICODE));
@@ -103,7 +106,7 @@ class DeliveryBackgroundWorkTest extends TestCase
         Http::assertSent(fn ($request): bool => str_contains($request->url(), '/api/v2/public/aeo'));
     }
 
-    public function test_failed_cold_cms_is_reported_and_deferred_without_legacy_retry(): void
+    public function test_cold_cms_does_not_fetch_report_an_upstream_failure_or_defer_content(): void
     {
         Http::fake(['*' => Http::response('unavailable', 503, ['Content-Type' => 'text/plain'])]);
         $this->artisan('smking:delivery:work', ['--prepare' => true])->assertExitCode(0);
@@ -112,11 +115,9 @@ class DeliveryBackgroundWorkTest extends TestCase
         $page = $this->app->make(CmsClient::class)->forSlug('article');
 
         $this->assertSame('server_error', $page->status);
-        $this->assertSame(1, $this->app->make(DeliveryWorklist::class)->status()['counts']['pending']);
-        $this->assertSame(1, $this->app->make(DeliveryReportOutbox::class)->status()['pending_failures']['upstream']);
-        Http::assertSentCount(1);
-        Http::assertSent(fn ($request): bool => str_contains($request->url(), '/api/v2/public/cms-page'));
-        Http::assertNotSent(fn ($request): bool => str_contains($request->url(), '/api/v1/'));
+        $this->assertSame(0, $this->app->make(DeliveryWorklist::class)->status()['counts']['pending']);
+        $this->assertSame(0, $this->app->make(DeliveryReportOutbox::class)->status()['pending_failures']['upstream'] ?? 0);
+        Http::assertNothingSent();
     }
 
     /** @return array<string, mixed> */

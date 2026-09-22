@@ -25,6 +25,14 @@ class LlmsTxtController
     {
         $result = $this->client->fetchPublicFile('llms_txt');
 
+        if ($result === null && $this->client->isPublicFileConfirmedMissing('llms_txt')) {
+            return new Response('', 404, [
+                'Content-Type' => 'text/plain; charset=utf-8',
+                'Cache-Control' => 'no-store',
+                'X-Smking-Status' => 'not_found',
+            ]);
+        }
+
         // 503 on fail rather than empty body — empty llms.txt would be a
         // wrong signal to AI crawlers ("site explicitly has no LLM-readable
         // index"). 503 means "retry later". AeoClient already backs off.
