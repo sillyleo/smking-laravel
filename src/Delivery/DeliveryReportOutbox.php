@@ -355,8 +355,12 @@ final class DeliveryReportOutbox
             }
         }
         if ($record['failures_at'] > 0 && $record['failures_at'] <= $now - self::EVENT_LIFETIME_MS) {
+            $hadFailures = array_sum($record['failures']) > 0;
             $record['failures'] = ['transport' => 0, 'upstream' => 0, 'capacity' => 0];
-            $this->lose($record, 'expired');
+            $record['failures_at'] = 0;
+            if ($hadFailures) {
+                $this->lose($record, 'expired');
+            }
         }
         if ($record['pending'] !== null
             && ($record['pending']['created_at'] <= $now - self::EVENT_LIFETIME_MS
