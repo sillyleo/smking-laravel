@@ -340,6 +340,7 @@ class DeliveryLocalPersistenceTest extends TestCase
         return [
             'malformed JSON' => ['json'],
             'invalid checksum' => ['checksum'],
+            'oversized record' => ['size'],
             'invalid state' => ['state'],
         ];
     }
@@ -423,6 +424,14 @@ class DeliveryLocalPersistenceTest extends TestCase
     {
         if ($corruption === 'json') {
             file_put_contents($path, '{');
+
+            return;
+        }
+        if ($corruption === 'size') {
+            $stream = fopen($path, 'c+b');
+            $this->assertIsResource($stream);
+            $this->assertTrue(ftruncate($stream, 16_777_217));
+            fclose($stream);
 
             return;
         }
