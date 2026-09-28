@@ -158,6 +158,49 @@ class DeliveryReportOutboxTest extends TestCase
         $this->assertSame(1, $status['losses']['retry_exhausted']);
     }
 
+    public function test_accepted_failure_report_does_not_create_repeated_expired_losses(): void
+    {
+        $now = 1789344000000;
+        $cache = $this->app->make(\Illuminate\Contracts\Cache\Factory::class)->store('delivery_test');
+        $outbox = new DeliveryReportOutbox(
+            cache: $cache,
+            config: config(),
+            clock: static function () use (&$now): int {
+                return $now;
+            },
+        );
+        $transport = new DeliveryReportTransport(
+            http: $this->app->make(\Illuminate\Http\Client\Factory::class),
+            config: config(),
+            clock: static function () use (&$now): int {
+                return $now;
+            },
+        );
+        Http::fake(function ($request) {
+            $payload = json_decode($request->body(), true, 32, JSON_THROW_ON_ERROR);
+
+            return Http::response([
+                'status' => 'accepted',
+                'report_id' => $payload['report_id'],
+                'state_applied' => true,
+                'accepted_event_ids' => [],
+                'accepted_observation_ids' => [],
+            ], 200, ['Content-Type' => 'application/json']);
+        });
+
+        $this->assertTrue($outbox->prepare());
+        $this->assertTrue($outbox->recordFailure('transport'));
+        $this->assertSame(['sent' => 1, 'accepted' => 1, 'error' => null], $outbox->runOnce($transport));
+        $this->assertSame(0, $outbox->status()['pending_failures']['transport']);
+
+        $now += 600_001;
+        $this->assertSame(['sent' => 1, 'accepted' => 1, 'error' => null], $outbox->runOnce($transport));
+        $now += 60_001;
+        $outbox->runOnce($transport);
+
+        $this->assertSame([], $outbox->status()['losses']);
+    }
+
     public function test_legacy_tracking_remains_v1_but_unknown_mode_fails_closed(): void
     {
         Http::fake();
