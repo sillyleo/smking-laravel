@@ -11,6 +11,7 @@ use Illuminate\Contracts\Cache\Repository as CacheRepository;
 use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Http\Client\Response;
+use JsonException;
 use Psr\Http\Message\ResponseInterface;
 use RuntimeException;
 use Throwable;
@@ -237,7 +238,7 @@ final class OnDemandDelivery
             }
 
             $result = $this->capacity->run($resource, $identifier, function () use ($resource, $identifier, $budget, $target, $targetToken, $force, $expectedPublication): DeliveryResult {
-                $cached = $this->cached($resource, $identifier);
+                $cached = $this->cachedForRefresh($resource, $identifier);
                 if (! $force && $cached->snapshot?->isFresh(($this->clock)())
                     && $this->matchesTarget($cached->snapshot, $target)
                     && ! ($this->state($resource, $identifier)['refresh_requested'] ?? false)
@@ -253,7 +254,7 @@ final class OnDemandDelivery
                 $generation = bin2hex(random_bytes(16));
                 $prepared = $this->guardTarget($resource, $identifier, $targetToken, function () use ($resource, $identifier, $generation): mixed {
                     return $this->withLock($this->stateKey($resource, $identifier), function () use ($resource, $identifier, $generation): bool {
-                        $state = $this->state($resource, $identifier) ?? $this->emptyState($resource, $identifier);
+                        $state = $this->stateForRefresh($resource, $identifier);
                         $state['generation'] = $generation;
 
                         return $this->putState($resource, $identifier, $state);
@@ -721,6 +722,44 @@ final class OnDemandDelivery
     private function state(string $resource, string $identifier): ?array
     {
         return $this->validateState($resource, $identifier, $this->local->read($this->stateKey($resource, $identifier)));
+    }
+
+    private function cachedForRefresh(string $resource, string $identifier): DeliveryResult
+    {
+        try {
+            return $this->cached($resource, $identifier);
+        } catch (Throwable $error) {
+            if (! $this->repairableStateCorruption($error)) {
+                throw $error;
+            }
+
+            return new DeliveryResult(error: 'cache_unavailable');
+        }
+    }
+
+    /** Background writers may replace verified corruption; visitor reads stay strict. */
+    private function stateForRefresh(string $resource, string $identifier): array
+    {
+        try {
+            return $this->state($resource, $identifier) ?? $this->emptyState($resource, $identifier);
+        } catch (Throwable $error) {
+            if (! $this->repairableStateCorruption($error)) {
+                throw $error;
+            }
+
+            return $this->emptyState($resource, $identifier);
+        }
+    }
+
+    private function repairableStateCorruption(Throwable $error): bool
+    {
+        // Storage access, path, permission and symlink failures are never repairable here.
+        return $error instanceof JsonException
+            || ($error instanceof RuntimeException && in_array($error->getMessage(), [
+                'delivery_local_record_invalid',
+                'delivery_local_size_invalid',
+                'delivery_state_invalid',
+            ], true));
     }
 
     private function validateState(string $resource, string $identifier, mixed $state): ?array

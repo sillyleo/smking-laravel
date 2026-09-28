@@ -306,8 +306,108 @@ class DeliveryLocalPersistenceTest extends TestCase
         $this->assertNotNull($this->delivery()->importCached('cms-page', 'slug:article')->snapshot);
         file_put_contents($this->directory.'/content/'.hash('sha256', $this->oldStateKey()).'.json', '{');
         $this->assertSame('cache_unavailable', $this->delivery()->peek('cms-page', 'slug:article')->error);
+        $this->assertSame('cache_unavailable', $this->delivery()->read('cms-page', 'slug:article')->error);
         $this->assertSame('cache_unavailable', $this->delivery()->importCached('cms-page', 'slug:article')->error);
         Http::assertNothingSent();
+    }
+
+    #[DataProvider('repairableLocalCorruptions')]
+    public function test_explicit_preparation_rebuilds_corrupt_local_content(string $corruption): void
+    {
+        Http::fake(fn () => Http::response(
+            $this->payload('aeo'),
+            200,
+            ['Content-Type' => 'application/json'],
+        ));
+
+        $delivery = $this->delivery();
+        $this->assertNotNull($delivery->refresh('aeo', 'path:/article', new WaitBudget(500))->snapshot);
+
+        $stateKey = 'smking:delivery:v2:c1:'.$this->site().':state:'.hash('sha256', 'aeo|path:/article');
+        $this->corruptLocalRecord($this->directory.'/content/'.hash('sha256', $stateKey).'.json', $corruption);
+        $this->assertSame('cache_unavailable', $delivery->peek('aeo', 'path:/article')->error);
+
+        $repaired = $delivery->prepare('aeo', 'path:/article', new WaitBudget(500));
+
+        Http::assertSentCount(2);
+        $this->assertNull($repaired->error);
+        $this->assertSame('ready', $repaired->snapshot?->payload['status']);
+        $this->assertSame('ready', $delivery->peek('aeo', 'path:/article')->snapshot?->payload['status']);
+    }
+
+    public static function repairableLocalCorruptions(): array
+    {
+        return [
+            'malformed JSON' => ['json'],
+            'invalid checksum' => ['checksum'],
+            'invalid state' => ['state'],
+        ];
+    }
+
+    public function test_background_refresh_rebuilds_corrupt_local_content(): void
+    {
+        Http::fake(fn () => Http::response(
+            $this->payload('aeo'),
+            200,
+            ['Content-Type' => 'application/json'],
+        ));
+
+        $delivery = $this->delivery();
+        $this->assertNotNull($delivery->refresh('aeo', 'path:/article', new WaitBudget(500))->snapshot);
+        $stateKey = 'smking:delivery:v2:c1:'.$this->site().':state:'.hash('sha256', 'aeo|path:/article');
+        $this->corruptLocalRecord($this->directory.'/content/'.hash('sha256', $stateKey).'.json', 'json');
+
+        $repaired = $delivery->refresh('aeo', 'path:/article', new WaitBudget(500));
+
+        Http::assertSentCount(2);
+        $this->assertNull($repaired->error);
+        $this->assertSame('ready', $delivery->peek('aeo', 'path:/article')->snapshot?->payload['status']);
+    }
+
+    public function test_corrupt_local_content_remains_repairable_after_source_failure(): void
+    {
+        Http::fake(['*' => Http::sequence()
+            ->push($this->payload('aeo'), 200, ['Content-Type' => 'application/json'])
+            ->push([], 500, ['Content-Type' => 'application/json'])
+            ->push($this->payload('aeo'), 200, ['Content-Type' => 'application/json'])]);
+
+        $delivery = $this->delivery();
+        $this->assertNotNull($delivery->refresh('aeo', 'path:/article', new WaitBudget(500))->snapshot);
+        $stateKey = 'smking:delivery:v2:c1:'.$this->site().':state:'.hash('sha256', 'aeo|path:/article');
+        $this->corruptLocalRecord($this->directory.'/content/'.hash('sha256', $stateKey).'.json', 'json');
+
+        $this->assertSame('upstream', $delivery->prepare('aeo', 'path:/article', new WaitBudget(500))->error);
+        $this->assertSame('cache_miss', $delivery->peek('aeo', 'path:/article')->error);
+
+        $this->now += 31_000;
+        $repaired = $delivery->prepare('aeo', 'path:/article', new WaitBudget(500));
+
+        Http::assertSentCount(3);
+        $this->assertNull($repaired->error);
+        $this->assertSame('ready', $delivery->peek('aeo', 'path:/article')->snapshot?->payload['status']);
+    }
+
+    public function test_explicit_preparation_never_replaces_a_symlinked_local_record(): void
+    {
+        Http::fake(fn () => Http::response(
+            $this->payload('aeo'),
+            200,
+            ['Content-Type' => 'application/json'],
+        ));
+
+        $delivery = $this->delivery();
+        $this->assertNotNull($delivery->refresh('aeo', 'path:/article', new WaitBudget(500))->snapshot);
+        $stateKey = 'smking:delivery:v2:c1:'.$this->site().':state:'.hash('sha256', 'aeo|path:/article');
+        $statePath = $this->directory.'/content/'.hash('sha256', $stateKey).'.json';
+        $outside = $this->directory.'/outside.json';
+        file_put_contents($outside, '{');
+        unlink($statePath);
+        symlink($outside, $statePath);
+
+        $this->assertSame('cache_unavailable', $delivery->prepare('aeo', 'path:/article', new WaitBudget(500))->error);
+        $this->assertTrue(is_link($statePath));
+        $this->assertSame('{', file_get_contents($outside));
+        Http::assertSentCount(1);
     }
 
     private function seedOldCache(): array
@@ -317,6 +417,32 @@ class DeliveryLocalPersistenceTest extends TestCase
             'generation' => str_repeat('c', 32), 'success' => $snapshot->toCache(), 'missing' => null];
         $this->cache->forever($this->oldStateKey(), $state);
         return $state;
+    }
+
+    private function corruptLocalRecord(string $path, string $corruption): void
+    {
+        if ($corruption === 'json') {
+            file_put_contents($path, '{');
+
+            return;
+        }
+
+        $record = json_decode((string) file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
+        if ($corruption === 'checksum') {
+            $record['checksum'] = str_repeat('0', 64);
+        } elseif ($corruption === 'state') {
+            $record['data']['resource'] = 'markdown';
+            $record['checksum'] = hash('sha256', $this->encodeLocalRecord($record['data']));
+        }
+        file_put_contents($path, $this->encodeLocalRecord($record));
+    }
+
+    private function encodeLocalRecord(array $record): string
+    {
+        return json_encode(
+            $record,
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRESERVE_ZERO_FRACTION | JSON_THROW_ON_ERROR,
+        );
     }
 
     private function missingPayload(string $resource): array
