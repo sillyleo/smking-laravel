@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+## v0.23.0-beta.3 — Corrupt local snapshot recovery (2026-09-28)
+
+This pre-release remains limited to explicit installation on the isolated
+leo-test host. It keeps the `SMKING_DELIVERY_MODE=legacy` default and does not
+enable delivery flags, schedulers, workers, or public route takeover.
+
+### Fixed
+- Allow explicit prewarm and background refresh work to rebuild local content
+  records whose JSON, checksum, size, or state structure is invalid.
+- Keep visitor reads local-only while a record is corrupt, and do not treat
+  symlinks, path violations, permission failures, or other storage errors as
+  replaceable content corruption.
+- Preserve retry safety when the first rebuild request fails, so a later
+  operator or background attempt can recover after the circuit delay.
+
+## v0.23.0-beta.2 — Report outbox loss accounting (2026-09-23)
+
+This pre-release remains limited to explicit installation on the isolated
+leo-test host. It keeps the `SMKING_DELIVERY_MODE=legacy` default and does not
+enable delivery flags, schedulers, workers, or public route takeover.
+
+### Fixed
+- Stop a previously accepted failure report from adding a new `expired` loss
+  on every later report tick after its stale timestamp crosses the retention
+  window.
+- Clear that stale timestamp even when the pending failure counters are already
+  zero, while preserving one-time loss accounting for failures that genuinely
+  expire before delivery.
+
 ## v0.23.0-beta.1 — Durable local delivery candidate (2026-09-22)
 
 This pre-release is only for explicit installation on the isolated leo-test
