@@ -201,15 +201,24 @@ class DeliveryReportOutboxTest extends TestCase
         $this->assertSame([], $afterAck['losses']);
         $this->assertNull($afterAck['loss_token']);
 
-        $this->assertFalse($outbox->capture($classification, '/products/lost-after-ack', 200));
-        $third = $outbox->status();
-        $this->assertSame(['overflow' => 1], $third['losses']);
-        $this->assertNotSame($first['loss_token'], $third['loss_token']);
+        $key = 'smking:delivery:v2:reports:'.substr(hash('sha256',
+            (string) config('smking.api_key').'|'
+            .(string) config('smking.base_url').'|'
+            .(string) config('app.url')
+        ), 0, 24);
+        $legacyRecord = $cache->get($key);
+        $this->assertIsArray($legacyRecord);
+        $legacyRecord['losses'] = ['overflow' => 2];
+        $this->assertTrue($cache->put($key, $legacyRecord, 604_800));
 
-        $this->artisan('smking:delivery:report', ['--ack-losses' => $first['loss_token']])
+        $third = $outbox->status();
+        $this->assertSame(['overflow' => 2], $third['losses']);
+        $this->assertNotSame($second['loss_token'], $third['loss_token']);
+
+        $this->artisan('smking:delivery:report', ['--ack-losses' => $second['loss_token']])
             ->expectsOutputToContain('losses_changed')
             ->assertExitCode(1);
-        $this->assertSame(['overflow' => 1], $outbox->status()['losses']);
+        $this->assertSame(['overflow' => 2], $outbox->status()['losses']);
         Http::assertNothingSent();
     }
 

@@ -20,17 +20,17 @@ final class DeliveryReportCommand extends Command
 
     public function handle(DeliveryReportOutbox $outbox, DeliveryReportTransport $transport): int
     {
-        $acknowledge = $this->option('ack-losses');
-        $selected = ((bool) $this->option('prepare') ? 1 : 0)
+        $lossToken = $this->option('ack-losses');
+        $selectedOptionCount = ((bool) $this->option('prepare') ? 1 : 0)
             + ((bool) $this->option('status') ? 1 : 0)
-            + ($acknowledge !== null ? 1 : 0);
-        if ($selected > 1) {
+            + ($lossToken !== null ? 1 : 0);
+        if ($selectedOptionCount > 1) {
             $this->error('--prepare、--status 與 --ack-losses 不可同時使用。');
 
             return self::INVALID;
         }
-        if ($acknowledge !== null) {
-            $summary = $outbox->acknowledgeLosses(is_string($acknowledge) ? $acknowledge : '');
+        if ($lossToken !== null) {
+            $summary = $outbox->acknowledgeLosses(is_string($lossToken) ? $lossToken : '');
             $this->line(json_encode($summary, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR));
 
             return $summary['acknowledged'] && $summary['error'] === null

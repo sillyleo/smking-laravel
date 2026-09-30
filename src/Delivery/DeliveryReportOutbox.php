@@ -326,6 +326,7 @@ final class DeliveryReportOutbox
 
                 $losses = $record['losses'];
                 $record['losses'] = [];
+                $this->advanceLossSequence($record);
                 $this->save($record);
 
                 return ['acknowledged' => true, 'losses' => $losses, 'error' => null];
@@ -431,6 +432,11 @@ final class DeliveryReportOutbox
     private function lose(array &$record, string $reason): void
     {
         $record['losses'][$reason] = min(1_000_000, ($record['losses'][$reason] ?? 0) + 1);
+        $this->advanceLossSequence($record);
+    }
+
+    private function advanceLossSequence(array &$record): void
+    {
         $record['loss_sequence'] = $record['loss_sequence'] === PHP_INT_MAX
             ? 0
             : $record['loss_sequence'] + 1;
