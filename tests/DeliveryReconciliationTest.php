@@ -258,7 +258,7 @@ class DeliveryReconciliationTest extends TestCase
         $this->assertTrue($events[0]->withoutOverlapping);
     }
 
-    public function test_fifty_known_items_continue_across_batches_without_rechecking_the_front(): void
+    public function test_fifty_mixed_items_recover_from_budget_exhaustion_and_continue_across_daily_batches(): void
     {
         Http::preventStrayRequests();
         Http::fake(function ($request) {
@@ -284,6 +284,20 @@ class DeliveryReconciliationTest extends TestCase
         }
         Http::assertSentCount(50);
         $this->now = $this->time(sprintf('2026-09-19 03:%02d:00', $reconciliation->scheduledMinute()));
+
+        $monotonic = 0.0;
+        $clockCalls = 0;
+        $reconciliation = $this->reconciliation(function () use (&$monotonic, &$clockCalls): float {
+            if (++$clockCalls === 3) $monotonic += 100;
+            return $monotonic;
+        });
+        $first = $reconciliation->runBatch($this->delivery($reconciliation), 10, 100);
+        $this->assertSame(0, $first['checked']);
+        $this->assertSame(50, $first['pending']);
+        $this->assertFalse($first['complete']);
+        $this->assertFalse($reconciliation->status()['in_flight']);
+        Http::assertSentCount(50);
+
         for ($batch = 0; $batch < 5; $batch++) {
             // Construct a new instance to simulate the next scheduler process.
             $reconciliation = $this->reconciliation();
@@ -296,6 +310,17 @@ class DeliveryReconciliationTest extends TestCase
         $this->assertSame(50, $reconciliation->status()['checked']);
         $this->assertSame(0, $reconciliation->runBatch($delivery, 10, 5000)['checked']);
         Http::assertSentCount(100);
+
+        $this->now += 86400000;
+        for ($batch = 0; $batch < 5; $batch++) {
+            $reconciliation = $this->reconciliation();
+            $summary = $reconciliation->runBatch($this->delivery($reconciliation), 10, 5000);
+            $this->assertSame(10, $summary['checked'], 'next-day batch '.$batch);
+            $this->now += 1000;
+        }
+        $this->assertTrue($reconciliation->status()['complete']);
+        $this->assertSame(50, $reconciliation->status()['checked']);
+        Http::assertSentCount(150);
     }
 
     public function test_registry_and_daily_progress_survive_cache_flush(): void
@@ -329,13 +354,14 @@ class DeliveryReconciliationTest extends TestCase
         $this->assertSame(0, $summary['failed']);
     }
 
-    private function reconciliation(): DeliveryReconciliation
+    private function reconciliation(?\Closure $monotonicClock = null): DeliveryReconciliation
     {
         return new DeliveryReconciliation(
             cache: $this->cache,
             config: config(),
             clock: fn (): int => $this->now,
             maxItems: 100,
+            monotonicClock: $monotonicClock,
         );
     }
 
