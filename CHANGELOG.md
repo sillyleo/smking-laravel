@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## v0.23.0-beta.4 — Safe report loss acknowledgement (2026-09-30)
+
+This pre-release remains limited to explicit installation on the isolated
+leo-test host. It keeps the `SMKING_DELIVERY_MODE=legacy` default and does not
+enable delivery flags, schedulers, workers, or public route takeover.
+
+### Added
+- Add `smking:delivery:report --ack-losses=<loss_token>` so an operator can
+  acknowledge only the exact loss counters already inspected through
+  `smking:delivery:report --status`.
+
+### Fixed
+- Preserve pending events, path observations, failure counters, and diagnostic
+  state while acknowledging losses; the acknowledgement itself sends no HTTP.
+- Reject changed or replayed tokens, including after clearing losses, rolling
+  back to an older outbox writer, and later upgrading again.
+
 ## v0.23.0-beta.3 — Corrupt local snapshot recovery (2026-09-28)
 
 This pre-release remains limited to explicit installation on the isolated
