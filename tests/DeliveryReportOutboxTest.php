@@ -158,6 +158,81 @@ class DeliveryReportOutboxTest extends TestCase
         $this->assertSame(1, $status['losses']['retry_exhausted']);
     }
 
+    public function test_loss_acknowledgement_requires_the_exact_status_token_and_preserves_pending_events(): void
+    {
+        Http::fake();
+        $now = (int) floor(microtime(true) * 1000);
+        $cache = $this->app->make(\Illuminate\Contracts\Cache\Factory::class)->store('delivery_test');
+        $outbox = new DeliveryReportOutbox(
+            cache: $cache,
+            config: config(),
+            clock: static function () use (&$now): int {
+                return $now;
+            },
+            eventCapacity: 1,
+        );
+        $this->app->instance(DeliveryReportOutbox::class, $outbox);
+        $classification = ['bot' => 'GPTBot', 'bot_category' => 'training', 'purpose' => 'training'];
+
+        $this->assertTrue($outbox->prepare());
+        $this->assertTrue($outbox->capture($classification, '/products/preserved', 200));
+        $this->assertFalse($outbox->capture($classification, '/products/lost-1', 200));
+        $first = $outbox->status();
+        $this->assertSame(1, $first['pending_events']);
+        $this->assertSame(['overflow' => 1], $first['losses']);
+        $this->assertMatchesRegularExpression('/^sha256:[a-f0-9]{64}$/D', $first['loss_token']);
+
+        $this->assertFalse($outbox->capture($classification, '/products/lost-2', 200));
+        $this->artisan('smking:delivery:report', ['--ack-losses' => $first['loss_token']])
+            ->expectsOutputToContain('losses_changed')
+            ->assertExitCode(1);
+
+        $second = $outbox->status();
+        $this->assertSame(1, $second['pending_events']);
+        $this->assertSame(['overflow' => 2], $second['losses']);
+        $this->assertNotSame($first['loss_token'], $second['loss_token']);
+
+        $this->artisan('smking:delivery:report', ['--ack-losses' => $second['loss_token']])
+            ->expectsOutputToContain('"acknowledged":true')
+            ->assertExitCode(0);
+
+        $afterAck = $outbox->status();
+        $this->assertSame(1, $afterAck['pending_events']);
+        $this->assertSame([], $afterAck['losses']);
+        $this->assertNull($afterAck['loss_token']);
+
+        $key = 'smking:delivery:v2:reports:'.substr(hash('sha256',
+            (string) config('smking.api_key').'|'
+            .(string) config('smking.base_url').'|'
+            .(string) config('app.url')
+        ), 0, 24);
+        $legacyRecord = $cache->get($key);
+        $this->assertIsArray($legacyRecord);
+        $legacyRecord['losses'] = ['overflow' => 2];
+        $this->assertTrue($cache->put($key, $legacyRecord, 604_800));
+
+        $third = $outbox->status();
+        $this->assertSame(['overflow' => 2], $third['losses']);
+        $this->assertNotSame($second['loss_token'], $third['loss_token']);
+
+        $this->artisan('smking:delivery:report', ['--ack-losses' => $second['loss_token']])
+            ->expectsOutputToContain('losses_changed')
+            ->assertExitCode(1);
+        $this->assertSame(['overflow' => 2], $outbox->status()['losses']);
+        Http::assertNothingSent();
+    }
+
+    public function test_loss_acknowledgement_cannot_be_combined_with_prepare_or_status(): void
+    {
+        $token = 'sha256:'.str_repeat('a', 64);
+
+        $this->artisan('smking:delivery:report', ['--prepare' => true, '--ack-losses' => $token])
+            ->assertExitCode(2);
+        $this->artisan('smking:delivery:report', ['--status' => true, '--ack-losses' => $token])
+            ->assertExitCode(2);
+        Http::assertNothingSent();
+    }
+
     public function test_accepted_failure_report_does_not_create_repeated_expired_losses(): void
     {
         $now = 1789344000000;

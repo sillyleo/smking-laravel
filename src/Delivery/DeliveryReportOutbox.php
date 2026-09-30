@@ -277,6 +277,7 @@ final class DeliveryReportOutbox
                 'pending_observations' => count($record['observations']),
                 'pending_failures' => $record['failures'],
                 'losses' => $record['losses'],
+                'loss_token' => $this->lossToken($record['losses'], $record['loss_sequence']),
                 'last_error' => $record['last_error'],
                 'error' => null,
             ];
@@ -287,9 +288,60 @@ final class DeliveryReportOutbox
                 'pending_observations' => null,
                 'pending_failures' => [],
                 'losses' => [],
+                'loss_token' => null,
                 'last_error' => null,
                 'error' => 'outbox_unavailable',
             ];
+        }
+    }
+
+    /**
+     * Acknowledge the exact loss counters an operator already inspected.
+     * Pending reports and diagnostic state are deliberately preserved.
+     *
+     * @return array{acknowledged:bool,losses:array<string,int>,error:?string}
+     */
+    public function acknowledgeLosses(string $token): array
+    {
+        $summary = ['acknowledged' => false, 'losses' => [], 'error' => null];
+        if (PHP_SAPI !== 'cli'
+            || preg_match('/^sha256:[a-f0-9]{64}$/D', $token) !== 1
+            || ! $this->supported()
+        ) {
+            $summary['error'] = 'invalid_input';
+
+            return $summary;
+        }
+
+        try {
+            $result = $this->locked(function () use ($token): array {
+                $record = $this->load();
+                $current = $this->lossToken($record['losses'], $record['loss_sequence']);
+                if ($current === null) {
+                    return ['acknowledged' => false, 'losses' => [], 'error' => 'no_losses'];
+                }
+                if (! hash_equals($current, $token)) {
+                    return ['acknowledged' => false, 'losses' => $record['losses'], 'error' => 'losses_changed'];
+                }
+
+                $losses = $record['losses'];
+                $record['losses'] = [];
+                $this->advanceLossSequence($record);
+                $this->save($record);
+
+                return ['acknowledged' => true, 'losses' => $losses, 'error' => null];
+            });
+            if (! is_array($result)) {
+                $summary['error'] = 'outbox_busy';
+
+                return $summary;
+            }
+
+            return $result;
+        } catch (Throwable) {
+            $summary['error'] = 'outbox_unavailable';
+
+            return $summary;
         }
     }
 
@@ -380,6 +432,28 @@ final class DeliveryReportOutbox
     private function lose(array &$record, string $reason): void
     {
         $record['losses'][$reason] = min(1_000_000, ($record['losses'][$reason] ?? 0) + 1);
+        $this->advanceLossSequence($record);
+    }
+
+    private function advanceLossSequence(array &$record): void
+    {
+        $record['loss_sequence'] = $record['loss_sequence'] === PHP_INT_MAX
+            ? 0
+            : $record['loss_sequence'] + 1;
+    }
+
+    /** @param array<string, int> $losses */
+    private function lossToken(array $losses, int $sequence): ?string
+    {
+        if (array_sum($losses) === 0) {
+            return null;
+        }
+        ksort($losses);
+
+        return 'sha256:'.hash('sha256', "smking-report-loss-ack-v1\n".$this->key()."\n".$sequence."\n".json_encode(
+            $losses,
+            JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR,
+        ));
     }
 
     private function load(): array
@@ -398,7 +472,14 @@ final class DeliveryReportOutbox
                 'last_sent_at' => 0,
                 'last_error' => null,
                 'losses' => [],
+                'loss_sequence' => 0,
             ];
+        }
+        if (is_array($record)
+            && ($record['format'] ?? null) === self::FORMAT
+            && ! array_key_exists('loss_sequence', $record)
+        ) {
+            $record['loss_sequence'] = 0;
         }
         if (! is_array($record)
             || ($record['format'] ?? null) !== self::FORMAT
@@ -416,6 +497,8 @@ final class DeliveryReportOutbox
             || ! array_key_exists('last_error', $record)
             || ($record['last_error'] !== null && ! is_string($record['last_error']))
             || ! is_array($record['losses'] ?? null)
+            || ! is_int($record['loss_sequence'] ?? null)
+            || $record['loss_sequence'] < 0
         ) {
             throw new RuntimeException('delivery_report_outbox_invalid');
         }

@@ -13,16 +13,29 @@ final class DeliveryReportCommand extends Command
 {
     protected $signature = 'smking:delivery:report
         {--prepare : Prepare local sender health without sending}
-        {--status : Read local sender health without renewing it}';
+        {--status : Read local sender health without renewing it}
+        {--ack-losses= : Acknowledge the exact loss token returned by --status without discarding pending reports}';
 
     protected $description = 'Send at most one signed smking SDK report';
 
     public function handle(DeliveryReportOutbox $outbox, DeliveryReportTransport $transport): int
     {
-        if ($this->option('prepare') && $this->option('status')) {
-            $this->error('--prepare 與 --status 不可同時使用。');
+        $lossToken = $this->option('ack-losses');
+        $selectedOptionCount = ((bool) $this->option('prepare') ? 1 : 0)
+            + ((bool) $this->option('status') ? 1 : 0)
+            + ($lossToken !== null ? 1 : 0);
+        if ($selectedOptionCount > 1) {
+            $this->error('--prepare、--status 與 --ack-losses 不可同時使用。');
 
             return self::INVALID;
+        }
+        if ($lossToken !== null) {
+            $summary = $outbox->acknowledgeLosses(is_string($lossToken) ? $lossToken : '');
+            $this->line(json_encode($summary, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR));
+
+            return $summary['acknowledged'] && $summary['error'] === null
+                ? self::SUCCESS
+                : self::FAILURE;
         }
         if ($this->option('status')) {
             $status = $outbox->status();

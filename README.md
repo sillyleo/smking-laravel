@@ -457,6 +457,22 @@ pnpm exec tsx scripts/export-delivery-preparation.mts \
 
 套件不啟動主機 scheduler，客戶仍須自行執行 Laravel scheduler 與背景 worker。L4B2 的來源工具與操作門檻已有本機候選，正式使用前仍須審查／CI 及真實主機驗收；本機候選測試不是實機凌晨輪次、正式 CDN 或 PHP-FPM 容量證據。
 
+### 回報損失確認（下一版候選）
+
+獨立回報若因容量、過期或重試耗盡留下永久損失，先讀取狀態並調查原因：
+
+```bash
+php artisan smking:delivery:report --status
+```
+
+確認資料已無法補送且損失可接受後，才使用該次狀態中的精確 token：
+
+```bash
+php artisan smking:delivery:report --ack-losses='sha256:從 status 複製的完整值'
+```
+
+此命令不發 HTTP，只清除 token 精確對應的 `losses`；待送事件、路徑觀測、故障計數與 `last_error` 均保留。檢查後若又有新損失，或清空後重播舊 token，命令會回 `losses_changed`，必須重新執行 `--status` 並調查。不得以刪除整筆 Redis／cache key 代替。完整步驟與尚待實機驗證的界線見[SDK 回報損失確認操作](../../docs/research/sdk-on-demand-delivery-report-loss-operations-2026-09-30.md)。
+
 Keep the customer site's `composer.lock` unchanged until that site is ready to
 test this version. SaaS migrations, delivery flags, CDN behavior, and the
 customer's worker and rollback procedure need separate validation before
