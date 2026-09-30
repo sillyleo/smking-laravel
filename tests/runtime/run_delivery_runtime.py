@@ -116,8 +116,11 @@ def read_exact(stream, count):
     return output
 
 
-def fastcgi(port, action):
-    query = urllib.parse.urlencode({'action': action})
+def fastcgi(port, action, slug=None):
+    parameters = {'action': action}
+    if slug is not None:
+        parameters['slug'] = slug
+    query = urllib.parse.urlencode(parameters)
     params = {
         'GATEWAY_INTERFACE': 'CGI/1.1',
         'SERVER_PROTOCOL': 'HTTP/1.1',
@@ -177,9 +180,10 @@ def main():
     fixed_package = sys.argv[1:] == ['--fixed-package']
     check(not sys.argv[1:] or fixed_package, 'usage: run_delivery_runtime.py [--fixed-package]')
     redis_binary = shutil.which('redis-server')
+    redis_cli = shutil.which('redis-cli')
     fpm_binary = shutil.which('php84-fpm') or shutil.which('php-fpm')
     php_binary = shutil.which('php')
-    check(redis_binary and fpm_binary and php_binary, 'php, php-fpm, and redis-server are required')
+    check(redis_binary and redis_cli and fpm_binary and php_binary, 'php, php-fpm, redis-server, and redis-cli are required')
 
     redis_port, origin_port, fpm_port = free_port(), free_port(), free_port()
     redis_process = fpm_process = None
@@ -233,6 +237,7 @@ def main():
                 'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
                 'SMKING_RUNTIME_REDIS_PORT': str(redis_port),
                 'SMKING_RUNTIME_ORIGIN_PORT': str(origin_port),
+                'SMKING_RUNTIME_LOCAL_STORE': str(temporary_path / 'local-store'),
                 'SMKING_RUNTIME_VENDOR': str(runtime_vendor),
                 **({'SMKING_RUNTIME_PACKAGE': str(runtime_package)} if runtime_package else {}),
             }
@@ -313,10 +318,46 @@ def main():
             check(all(item['status'] == 200 for item in tracked), 'crawler tracking did not release FPM workers')
             check(not any(path.endswith('/sdk/report') or path.endswith('/crawler-hit') for path in Origin.requests), 'visitor tracking sent HTTP')
 
+            before_cold = after_cold = None
+            persistent_reads = cold_same = cold_different = []
+            if not runtime_package:
+                before_cold = json.loads(fastcgi(fpm_port, 'status')['body'])
+                check(all(count == 0 for count in before_cold['work']['counts'].values()), 'warm reads scheduled content work')
+                origin_before_cold = list(Origin.requests)
+
+                flushed = subprocess.run(
+                    [redis_cli, '-h', '127.0.0.1', '-p', str(redis_port), 'FLUSHDB'],
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                    check=True,
+                )
+                check(flushed.stdout.strip() == 'OK', 'general cache flush failed')
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+                    persistent_reads = list(pool.map(lambda _: fastcgi(fpm_port, 'read'), range(50)))
+                check(all(item['status'] == 200 and item['body'] == BODY_V2 for item in persistent_reads), 'persistent reads after cache flush were not exact 200 responses')
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+                    cold_same = list(pool.map(lambda _: fastcgi(fpm_port, 'cold-read', 'never-prepared-same'), range(50)))
+                    cold_different = list(pool.map(
+                        lambda index: fastcgi(fpm_port, 'cold-read', f'never-prepared-{index}'),
+                        range(50),
+                    ))
+                check(all(item['status'] == 503 and item['body'] == 'Service unavailable' for item in cold_same), 'same-page cold reads did not fail explicitly')
+                check(all(item['status'] == 503 and item['body'] == 'Service unavailable' for item in cold_different), 'different cold reads did not fail explicitly')
+                check(Origin.requests == origin_before_cold, 'visitor reads used content HTTP')
+
+                after_cold = json.loads(fastcgi(fpm_port, 'status')['body'])
+                check(all(count == 0 for count in after_cold['work']['counts'].values()), 'visitor reads scheduled content work')
+
             stop(redis_process)
             redis_process = None
-            unavailable = fastcgi(fpm_port, 'read')
-            check(unavailable['status'] == 503 and unavailable['body'] == 'Service unavailable', 'Redis outage was not an explicit non-empty 503')
+            redis_outage = fastcgi(fpm_port, 'read')
+            if runtime_package:
+                check(redis_outage['status'] == 503 and redis_outage['body'] == 'Service unavailable', 'rollback candidate Redis outage was not an explicit non-empty 503')
+            else:
+                check(redis_outage['status'] == 200 and redis_outage['body'] == BODY_V2, 'Redis outage lost the persistent body')
             check(len(Origin.requests) == 2, 'Redis outage fell back to visitor HTTP')
 
             evidence = {
@@ -332,11 +373,17 @@ def main():
                 'warm_reads': len(reads),
                 'warm_http_statuses': sorted(set(item['status'] for item in reads)),
                 'warm_body_bytes': len(BODY_V2.encode()),
+                'persistent_reads_after_cache_flush': len(persistent_reads),
+                'cold_same_reads': len(cold_same),
+                'cold_different_reads': len(cold_different),
+                'cold_http_statuses': sorted(set(item['status'] for item in cold_same + cold_different)),
+                'content_work_before': before_cold['work']['counts'] if before_cold else None,
+                'content_work_after': after_cold['work']['counts'] if after_cold else None,
                 'origin_gets': Origin.requests,
                 'rollback_status': rollback['status'],
                 'tracking_requests': len(tracked),
                 'tracking_max_seconds': round(max(item['seconds'] for item in tracked), 3),
-                'redis_outage': {'status': unavailable['status'], 'body_bytes': len(unavailable['body'])},
+                'redis_outage': {'status': redis_outage['status'], 'body_bytes': len(redis_outage['body'])},
             }
             print(json.dumps(evidence, separators=(',', ':')))
         finally:
