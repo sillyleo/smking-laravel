@@ -9,6 +9,7 @@ use Orchestra\Testbench\Foundation\Application as TestbenchApplication;
 use Smking\Laravel\CmsClient;
 use Smking\Laravel\Data\CmsPage;
 use Smking\Laravel\Delivery\DeliveryReportOutbox;
+use Smking\Laravel\Delivery\DeliveryWorklist;
 use Smking\Laravel\Delivery\OnDemandDelivery;
 use Smking\Laravel\Http\Middleware\TrackCrawlerHit;
 use Smking\Laravel\SmkingServiceProvider;
@@ -78,6 +79,7 @@ function runtimeApplication(string $mode)
     $config->set('smking.webhook_secret', 'runtime-secret');
     $config->set('smking.cache.enabled', true);
     $config->set('smking.cache.store', 'delivery_runtime');
+    $config->set('smking.delivery.local_store_path', runtimeEnvironment('SMKING_RUNTIME_LOCAL_STORE'));
     $config->set('smking.delivery.mode', $mode);
     $config->set('smking.delivery.aeo_enabled', false);
     $config->set('smking.delivery.capacity', 2);
@@ -129,8 +131,14 @@ try {
         ], $work === 0 && $report === 0 && $prewarm === 0 ? 200 : 503);
     }
 
-    if ($action === 'read' || $action === 'legacy-read') {
-        $page = $app->make(CmsClient::class)->forSlug('article');
+    if ($action === 'read' || $action === 'legacy-read' || $action === 'cold-read') {
+        $slug = $action === 'cold-read'
+            ? (PHP_SAPI === 'cli' ? ($argv[2] ?? '') : ($_GET['slug'] ?? ''))
+            : 'article';
+        if (! is_string($slug) || preg_match('/^[a-z0-9-]{1,80}$/D', $slug) !== 1) {
+            runtimeJson(['error' => 'invalid_slug'], 400);
+        }
+        $page = $app->make(CmsClient::class)->forSlug($slug);
         $status = match ($page->status) {
             CmsPage::STATUS_READY => 200,
             CmsPage::STATUS_NOT_FOUND => 404,
@@ -141,6 +149,13 @@ try {
         header('Cache-Control: no-store');
         echo $page->isReady() ? $page->bodyHtml : 'Service unavailable';
         exit($status < 500 ? 0 : 1);
+    }
+
+    if ($action === 'status') {
+        runtimeJson([
+            'work' => $app->make(DeliveryWorklist::class)->status(),
+            'report' => $app->make(DeliveryReportOutbox::class)->status(),
+        ]);
     }
 
     if ($action === 'track') {

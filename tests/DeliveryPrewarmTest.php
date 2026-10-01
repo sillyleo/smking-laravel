@@ -10,7 +10,9 @@ use Smking\Laravel\CmsClient;
 use Smking\Laravel\Console\DeliveryPrewarmCommand;
 use Smking\Laravel\Delivery\OnDemandDelivery;
 use Smking\Laravel\Delivery\DeliveryReconciliation;
+use Smking\Laravel\Delivery\DeliveryReportOutbox;
 use Smking\Laravel\Delivery\DeliveryTargetState;
+use Smking\Laravel\Delivery\DeliveryWorklist;
 use Smking\Laravel\Delivery\WaitBudget;
 use Symfony\Component\Console\Tester\CommandTester;
 
@@ -196,7 +198,7 @@ class DeliveryPrewarmTest extends TestCase
         Http::assertSentCount(1);
     }
 
-    public function test_all_four_resources_can_be_prepared_and_checked_without_visitors_or_notifications(): void
+    public function test_blank_install_prepares_all_four_resources_without_visitors_or_notifications(): void
     {
         config()->set('smking.delivery.aeo_enabled', true);
         config()->set('smking.delivery.notifications_enabled', false);
@@ -214,8 +216,18 @@ class DeliveryPrewarmTest extends TestCase
             };
             return Http::response($payload, 200);
         });
+
+        $this->assertDirectoryDoesNotExist($this->directory);
+        $this->assertDirectoryDoesNotExist(config('smking.delivery.local_store_path'));
+        $this->assertSame('registry_uninitialized', $this->app->make(DeliveryReconciliation::class)->status()['error']);
+        Http::assertNothingSent();
+
         $this->artisan('smking:delivery:work', ['--prepare' => true])->assertExitCode(0);
         $this->artisan('smking:delivery:report', ['--prepare' => true])->assertExitCode(0);
+        $this->assertTrue($this->app->make(DeliveryWorklist::class)->status()['heartbeat_recent']);
+        $this->assertTrue($this->app->make(DeliveryReportOutbox::class)->status()['heartbeat_recent']);
+        Http::assertNothingSent();
+
         $selection = ['cms-page' => 'slug:article', 'aeo' => 'path:/article', 'markdown' => 'path:/article', 'site-file' => 'kind:robots'];
         foreach ($selection as $resource => $identifier) {
             [$exit, $summary] = $this->prewarm(['--resource' => $resource, '--identifier' => [$identifier]]);
@@ -232,7 +244,21 @@ class DeliveryPrewarmTest extends TestCase
         }
         $this->assertSame($before, $this->persistentHashes());
         $this->assertSame(4, $this->app->make(DeliveryReconciliation::class)->status()['known']);
-        $this->assertSame('legacy', config('smking.delivery.mode'));
+
+        config()->set('smking.delivery.mode', 'on_demand');
+        $this->app->make('cache')->store('prewarm_test')->flush();
+        $this->app->forgetInstance(OnDemandDelivery::class);
+        $this->app->forgetInstance(DeliveryReconciliation::class);
+        $delivery = $this->app->make(OnDemandDelivery::class);
+        foreach ($selection as $resource => $identifier) {
+            $result = $delivery->peek($resource, $identifier);
+            $this->assertSame(200, $result->httpStatus);
+            $this->assertNull($result->error);
+            $this->assertNotNull($result->snapshot);
+        }
+        $this->assertSame(4, $this->app->make(DeliveryReconciliation::class)->status()['known']);
+        $this->assertSame($before, $this->persistentHashes());
+        $this->assertSame('on_demand', config('smking.delivery.mode'));
         Http::assertSentCount(4);
     }
 

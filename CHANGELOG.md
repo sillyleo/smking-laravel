@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+## v0.23.0 — Durable on-demand delivery (2026-10-01)
+
+This stable release promotes the runtime validated through `v0.23.0-beta.4`.
+The package still defaults to `SMKING_DELIVERY_MODE=legacy`; publishing or
+installing it does not enable SaaS delivery flags, start host schedulers, or
+switch public traffic.
+
+### Added
+- Persist versioned Blog/CMS, AEO, Markdown, and public site-file snapshots
+  outside the ordinary Laravel cache so validated content remains available
+  during source outages, cache clears, process restarts, and same-code deploys.
+- Add explicit prewarm, readiness, rollback, doctor, bounded daily
+  reconciliation, background work, and independent report commands for
+  operators who deliberately enable `on_demand` delivery.
+- Accept versioned, signed update and withdrawal notifications while keeping
+  daily reconciliation as the bounded fallback for known content.
+
+### Safety and compatibility
+- Keep visitor reads local-only in `on_demand` mode. Unknown or corrupt local
+  content fails explicitly without fetching the source from visitor requests;
+  explicit prewarm or background refresh can rebuild replaceable corruption.
+- Preserve last-known-good content across timeouts, 429, 5xx, malformed
+  responses, interrupted downloads, and ordinary cache eviction while keeping
+  withdrawal and access-denial barriers authoritative.
+- Preserve the legacy AEO POST and CMS GET behavior unless an installation
+  explicitly changes its delivery mode and completes prewarm checks.
+- Existing `^0.22` and older Composer constraints do not select `0.23.0`.
+  Customers must deliberately change their constraint and lock file to upgrade.
+- The package does not modify a customer database. SaaS migrations, delivery
+  flags, customer upgrades, prewarm, and production enablement remain separate
+  operator actions.
+
 ## v0.23.0-beta.4 — Safe report loss acknowledgement (2026-09-30)
 
 This pre-release remains limited to explicit installation on the isolated
