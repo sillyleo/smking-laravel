@@ -135,6 +135,28 @@ class DeliveryNotificationUpdateTest extends TestCase
         return ['failed preparation' => [false], 'prepared replacement' => [true]];
     }
 
+    public function test_republication_with_same_content_version_cannot_reuse_prewithdrawal_v2_body(): void
+    {
+        config()->set('smking.delivery.mode', 'legacy');
+        $delivery = $this->app->make(OnDemandDelivery::class);
+        foreach ($this->identifiers() as $resource => $identifier) {
+            $this->assertNotNull($delivery->refresh($resource, $identifier, new WaitBudget(500))->snapshot);
+            $this->notify($this->envelope([$this->target($resource, $identifier, 'withdraw', 3)]))->assertOk();
+            $target = $this->target($resource, $identifier, 'update', 4);
+            $target['withdrawalRevision'] = 3;
+            $target['contentVersion'] = 'sha256:'.str_repeat('a', 64);
+            $this->notify($this->envelope([$target]))->assertOk();
+            $pending = $delivery->publication($resource, $identifier);
+            $this->assertNull($pending->snapshot);
+            $this->assertSame(404, $pending->httpStatus);
+            $this->assertSame('target_pending', $pending->error);
+            if ($resource === 'cms-page') {
+                $this->assertSame('not_found', $this->app->make(\Smking\Laravel\CmsClient::class)->forSlug('article')->status);
+            }
+        }
+        Http::assertSentCount(4);
+    }
+
     #[DataProvider('replacementOutcomes')]
     public function test_legacy_republication_keeps_withdrawn_content_hidden_until_replacement_is_prepared(bool $preparedReplacement): void
     {
