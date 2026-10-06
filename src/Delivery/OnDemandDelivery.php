@@ -437,7 +437,7 @@ final class OnDemandDelivery
             if ($record['target']['withdrawalRevision'] > 0
                 && $bodyRevision <= $record['target']['withdrawalRevision']
             ) {
-                return new DeliveryResult(error: 'target_pending', refreshRequired: true);
+                return new DeliveryResult(httpStatus: 404, error: 'target_pending', refreshRequired: true);
             }
 
             return new DeliveryResult(
@@ -448,7 +448,13 @@ final class OnDemandDelivery
             );
         }
 
-        return new DeliveryResult(error: 'target_pending', refreshRequired: true);
+        // Republish is not permission to reveal pre-withdrawal legacy content.
+        // Keep the absence authoritative until a safe replacement is prepared.
+        return new DeliveryResult(
+            httpStatus: $record['target']['withdrawalRevision'] > 0 ? 404 : null,
+            error: 'target_pending',
+            refreshRequired: true,
+        );
     }
 
     /** @param array{target:array<string,mixed>}|null $target */

@@ -1055,10 +1055,10 @@ class AeoClient
         return $publication !== null ? $this->publicFileResult($publication) : $file;
     }
 
-    /** A pending v2 target without a local body cannot replace legacy content. */
+    /** Ordinary pending updates may retain legacy content, never a withdrawn body. */
     private function authoritativePublication(?DeliveryResult $publication): ?DeliveryResult
     {
-        return $publication?->error === 'target_pending' && $publication->snapshot === null
+        return $publication?->error === 'target_pending' && $publication->snapshot === null && $publication->httpStatus !== 404
             ? null
             : $publication;
     }

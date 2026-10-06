@@ -252,7 +252,7 @@ class CmsClient
         if ($result->snapshot !== null) {
             return $this->pageFromPayload($result->snapshot->payload);
         }
-        if ($result->error === 'target_pending' && $this->deliveryMode() === 'legacy') {
+        if ($result->error === 'target_pending' && $result->httpStatus !== 404 && $this->deliveryMode() === 'legacy') {
             return $this->legacyCache?->peek($slug) ?? CmsPage::serverError();
         }
 
