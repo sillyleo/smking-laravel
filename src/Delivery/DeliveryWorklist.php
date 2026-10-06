@@ -122,6 +122,35 @@ final class DeliveryWorklist
         }
     }
 
+    /**
+     * Called only after a source-validated body is committed under its target fence.
+     * Active/new work is preserved; neither retry budgets nor heartbeats renew.
+     */
+    public function completePrepared(string $resource, string $identifier): bool
+    {
+        if (DeliveryIdentifier::parameters($resource, $identifier) === null || ! $this->supported()) {
+            return false;
+        }
+
+        try {
+            return $this->locked(function () use ($resource, $identifier): bool {
+                $record = $this->load();
+                $key = hash('sha256', $resource.'|'.$identifier);
+                $item = $record['items'][$key] ?? null;
+                if ($item !== null && $item['attempts'] >= self::MAX_ATTEMPTS
+                    && $item['lease_until'] <= ($this->clock)()
+                ) {
+                    unset($record['items'][$key]);
+                    $this->save($record);
+                }
+
+                return true;
+            }) === true;
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
     /** @return array{claimed:int,completed:int,deferred:int,error:?string} */
     public function runBatch(OnDemandDelivery $delivery, int $maxJobs, int $budgetMs): array
     {
