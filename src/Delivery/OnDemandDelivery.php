@@ -513,6 +513,11 @@ final class OnDemandDelivery
                 if (! $this->putState($resource, $identifier, $state)) {
                     return 'cache_unavailable';
                 }
+                if (! $missing && $this->worklist !== null
+                    && ! $this->worklist->completePrepared($resource, $identifier)
+                ) {
+                    return 'worklist_unavailable';
+                }
                 $this->writeControl($resource, denied: false, status: null, circuitUntil: 0);
 
                 return 'committed';
