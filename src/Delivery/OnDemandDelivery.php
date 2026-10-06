@@ -462,7 +462,9 @@ final class OnDemandDelivery
     {
         return $target === null
             || ($target['target']['action'] === 'update'
-                && ($snapshot->payload['delivery']['content_version'] ?? null) === $target['target']['contentVersion'])
+                && ($snapshot->payload['delivery']['content_version'] ?? null) === $target['target']['contentVersion']
+                && ($target['target']['withdrawalRevision'] === 0
+                    || ($snapshot->payload['delivery']['publication']['revision'] ?? 0) > $target['target']['withdrawalRevision']))
             || ($target['target']['action'] === 'withdraw'
                 && ($snapshot->payload['status'] ?? null) === 'not_found'
                 && DeliveryTargetState::normalize($snapshot->payload['delivery']['publication'] ?? []) === $target['target']);
