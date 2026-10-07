@@ -130,6 +130,90 @@ class DeliveryNotificationUpdateTest extends TestCase
         Http::assertSentCount(2);
     }
 
+    public static function replacementOutcomes(): array
+    {
+        return ['failed preparation' => [false], 'prepared replacement' => [true]];
+    }
+
+    public static function withdrawalReceipt(): array
+    {
+        return ['received withdrawal' => [true], 'missed withdrawal' => [false]];
+    }
+
+    #[DataProvider('withdrawalReceipt')]
+    public function test_republication_with_same_content_version_cannot_reuse_prewithdrawal_v2_body(bool $receivedWithdrawal): void
+    {
+        config()->set('smking.delivery.mode', 'legacy');
+        $delivery = $this->app->make(OnDemandDelivery::class);
+        foreach ($this->identifiers() as $resource => $identifier) {
+            $this->assertNotNull($delivery->refresh($resource, $identifier, new WaitBudget(500))->snapshot);
+            if ($receivedWithdrawal) {
+                $this->notify($this->envelope([$this->target($resource, $identifier, 'withdraw', 3)]))->assertOk();
+            }
+            $target = $this->target($resource, $identifier, 'update', 4);
+            $target['withdrawalRevision'] = 3;
+            $target['contentVersion'] = 'sha256:'.str_repeat('a', 64);
+            $this->notify($this->envelope([$target]))->assertOk();
+            $pending = $delivery->publication($resource, $identifier);
+            $this->assertNull($pending->snapshot);
+            $this->assertSame(404, $pending->httpStatus);
+            $this->assertSame('target_pending', $pending->error);
+            if ($resource === 'cms-page') {
+                $this->assertSame('not_found', $this->app->make(\Smking\Laravel\CmsClient::class)->forSlug('article')->status);
+            }
+        }
+        Http::assertSentCount(4);
+    }
+
+    #[DataProvider('replacementOutcomes')]
+    public function test_legacy_republication_keeps_withdrawn_content_hidden_until_replacement_is_prepared(bool $preparedReplacement): void
+    {
+        $this->test_pending_versioned_targets_do_not_hide_legacy_aeo_markdown_or_site_file_cache();
+        $client = $this->app->make(AeoClient::class);
+        $delivery = $this->app->make(OnDemandDelivery::class);
+        $targets = [];
+        foreach (['aeo' => 'path:/article', 'markdown' => 'path:/article', 'site-file' => 'kind:sitemap'] as $resource => $identifier) {
+            $targets[] = $this->target($resource, $identifier, 'withdraw', 3);
+        }
+        $read = fn (): array => [
+            $client->forPath('/article')->isReady(),
+            $client->getMarkdown('/article') !== null,
+            $client->fetchPublicFile('sitemap') !== null,
+        ];
+        $this->notify($this->envelope($targets))->assertOk();
+        $this->assertSame([false, false, false], $read());
+        foreach ($targets as &$target) {
+            $target['action'] = 'update';
+            $target['revision'] = $target['generation'] = 4;
+            $target['contentVersion'] = 'sha256:'.str_repeat('c', 64);
+        }
+        unset($target);
+        $this->notify($this->envelope($targets))->assertOk();
+        $this->assertSame([false, false, false], $read());
+        Http::assertSentCount(3);
+
+        foreach ($targets as $target) {
+            $payload = $this->payload($target['resource'], 'c');
+            $payload['delivery']['publication'] = $target;
+            $this->failure = $preparedReplacement
+                ? ['body' => $payload, 'status' => 200]
+                : ['body' => ['status' => 'unavailable'], 'status' => 503];
+            $prepared = $delivery->prepare($target['resource'], $target['identifier'], new WaitBudget(500));
+            $this->assertSame($preparedReplacement, $prepared->snapshot !== null);
+        }
+        if (! $preparedReplacement) {
+            // A failed refresh cannot reveal the withdrawn v1 cache.
+            $this->assertSame([false, false, false], $read());
+            Http::assertSentCount(6);
+            return;
+        }
+        $this->assertSame([true, true, true], $read());
+        $this->assertSame('Saved c', $client->forPath('/article')->jsonLd['name']);
+        $this->assertSame('# Saved c', $client->getMarkdown('/article'));
+        $this->assertStringContainsString('<!-- c -->', $client->fetchPublicFile('sitemap')['body']);
+        Http::assertSentCount(6);
+    }
+
     public function test_all_resources_keep_old_content_until_worker_validates_target(): void
     {
         $delivery = $this->app->make(OnDemandDelivery::class);

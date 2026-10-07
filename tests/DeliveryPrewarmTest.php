@@ -91,6 +91,113 @@ class DeliveryPrewarmTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_explicit_prewarm_recovers_only_the_selected_exhausted_content_work(): void
+    {
+        [$work, $delivery, $source] = $this->exhaustAeoWork(['/about', '/other']);
+        $this->assertSame(2, $work->status()['counts']['exhausted']);
+        $this->assertFalse($work->schedule('aeo', 'path:/about'));
+        Http::assertSentCount(3);
+        $source->available = true;
+        // Recovery is never visitor-driven, and does not grant an automatic fourth try.
+        $work->runBatch($delivery, 2, 5000);
+        Http::assertSentCount(3);
+        [$checkExit, $check] = $this->prewarm(['--resource' => 'aeo', '--identifier' => ['path:/about'], '--check' => true]);
+        $this->assertSame(1, $checkExit);
+        $this->assertSame('background_unavailable', $check['error']);
+        Http::assertSentCount(3);
+
+        [$exit, $summary] = $this->prewarm(['--resource' => 'aeo', '--identifier' => ['path:/about']]);
+        $this->assertSame(0, $exit, json_encode($summary));
+        $this->assertSame(1, $summary['ready']);
+        $this->assertNotNull($delivery->peek('aeo', 'path:/about')->snapshot);
+        $this->assertSame(1, $work->status()['counts']['exhausted']);
+        $this->assertTrue($work->status()['attention_required']);
+        $this->assertNull($delivery->peek('aeo', 'path:/other')->snapshot);
+        Http::assertSentCount(4);
+        $this->assertTrue($work->schedule('aeo', 'path:/about'));
+        $this->assertFalse($work->schedule('aeo', 'path:/other'));
+        Http::assertSentCount(4);
+    }
+
+    public function test_failed_explicit_recovery_does_not_clear_exhausted_work_or_grant_more_retries(): void
+    {
+        [$work, $delivery] = $this->exhaustAeoWork(['/about']);
+        [$exit, $summary] = $this->prewarm(['--resource' => 'aeo', '--identifier' => ['path:/about']]);
+        $this->assertSame(1, $exit);
+        $this->assertSame('upstream', $summary['error']);
+        $this->assertSame(1, $work->status()['counts']['exhausted']);
+        $this->assertFalse($work->schedule('aeo', 'path:/about'));
+        $this->assertNull($delivery->peek('aeo', 'path:/about')->snapshot);
+        Http::assertSentCount(4);
+    }
+
+    public function test_invalid_recovery_snapshot_does_not_clear_exhausted_work(): void
+    {
+        [$work, $delivery, $source] = $this->exhaustAeoWork(['/about']);
+        $source->available = true;
+        $source->payload = ['status' => 'ready', 'summary' => 'No validated delivery contract'];
+        [$exit] = $this->prewarm(['--resource' => 'aeo', '--identifier' => ['path:/about']]);
+        $this->assertSame(1, $exit);
+        $this->assertSame(1, $work->status()['counts']['exhausted']);
+        $this->assertNull($delivery->peek('aeo', 'path:/about')->snapshot);
+        Http::assertSentCount(4);
+    }
+
+    public function test_withdrawal_during_explicit_recovery_wins_and_keeps_the_failed_work_visible(): void
+    {
+        [$work, $delivery, $source] = $this->exhaustAeoWork(['/about']);
+        $source->available = true;
+        $source->onResponse = function (): void {
+            $this->app->make(DeliveryTargetState::class)->apply([
+                'resource' => 'aeo', 'identifier' => 'path:/about', 'revision' => 2,
+                'generation' => 2, 'withdrawalRevision' => 2, 'action' => 'withdraw', 'contentVersion' => null,
+            ]);
+        };
+        [$exit] = $this->prewarm(['--resource' => 'aeo', '--identifier' => ['path:/about']]);
+        $this->assertSame(1, $exit);
+        $this->assertSame(1, $work->status()['counts']['exhausted']);
+        $this->assertSame('withdrawn', $delivery->peek('aeo', 'path:/about')->error);
+        $this->assertNull($delivery->peek('aeo', 'path:/about')->snapshot);
+        Http::assertSentCount(4);
+    }
+
+    /** @return array{DeliveryWorklist, OnDemandDelivery, object} */
+    private function exhaustAeoWork(array $paths): array
+    {
+        config()->set('smking.delivery.mode', 'on_demand');
+        config()->set('smking.delivery.aeo_enabled', true);
+        $source = (object) ['now' => (int) floor(microtime(true) * 1000), 'available' => false];
+        $cache = app('cache')->store('prewarm_test');
+        $work = new DeliveryWorklist($cache, config(), clock: static fn (): int => $source->now);
+        $reports = $this->app->make(DeliveryReportOutbox::class);
+        $delivery = new OnDemandDelivery($cache, app(\Illuminate\Http\Client\Factory::class), config(),
+            clock: static fn (): int => $source->now, worklist: $work, reports: $reports,
+            reconciliation: $this->app->make(DeliveryReconciliation::class));
+        $this->app->instance(DeliveryWorklist::class, $work);
+        $this->app->instance(OnDemandDelivery::class, $delivery);
+        Http::preventStrayRequests();
+        Http::fake(function () use ($source) {
+            if (! $source->available) return Http::response(['error' => 'not_prepared'], 503);
+            if (isset($source->onResponse)) ($source->onResponse)();
+            if (isset($source->payload)) return Http::response($source->payload, 200);
+            $payload = $this->payload('unused', $source->now);
+            unset($payload['page']);
+            $payload['jsonLd'] = ['@type' => 'WebPage'];
+            $payload['summary'] = 'Recovered about';
+            return Http::response($payload, 200);
+        });
+        $this->assertTrue($reports->prepare());
+        $this->assertTrue($work->prepare());
+        foreach ($paths as $path) $this->assertTrue($work->schedule('aeo', 'path:'.$path));
+        for ($attempt = 0; $attempt < 3; $attempt++) {
+            $this->assertTrue($work->prepare());
+            $work->runBatch($delivery, count($paths), 5000);
+            $source->now += 120_000;
+        }
+        $this->assertTrue($work->prepare());
+        return [$work, $delivery, $source];
+    }
+
     public function test_invalid_or_oversized_batch_is_rejected_before_http(): void
     {
         Http::fake();

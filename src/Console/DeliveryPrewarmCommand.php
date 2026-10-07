@@ -70,7 +70,7 @@ final class DeliveryPrewarmCommand extends Command
                 return $this->finish($summary);
             }
 
-            if (! $this->backgroundReady($worklist, $reports)) {
+            if (! $this->backgroundReady($worklist, $reports, recoverExhausted: ! $this->option('check'))) {
                 $summary['error'] = 'background_unavailable';
 
                 return $this->finish($summary);
@@ -227,14 +227,15 @@ final class DeliveryPrewarmCommand extends Command
         return ['resource' => $resource, 'identifiers' => $identifiers];
     }
 
-    private function backgroundReady(DeliveryWorklist $worklist, DeliveryReportOutbox $reports): bool
+    private function backgroundReady(DeliveryWorklist $worklist, DeliveryReportOutbox $reports, bool $recoverExhausted = false): bool
     {
         $work = $worklist->status();
         $report = $reports->status();
 
         return $work['error'] === null
             && $work['heartbeat_recent'] === true
-            && $work['attention_required'] === false
+            && ($work['attention_required'] === false
+                || ($recoverExhausted && $work['counts']['expired'] === 0 && array_sum($work['dropped']) === 0))
             && $report['error'] === null
             && $report['heartbeat_recent'] === true
             && $report['last_error'] === null

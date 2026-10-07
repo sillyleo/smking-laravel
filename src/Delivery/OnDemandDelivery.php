@@ -437,7 +437,7 @@ final class OnDemandDelivery
             if ($record['target']['withdrawalRevision'] > 0
                 && $bodyRevision <= $record['target']['withdrawalRevision']
             ) {
-                return new DeliveryResult(error: 'target_pending', refreshRequired: true);
+                return new DeliveryResult(httpStatus: 404, error: 'target_pending', refreshRequired: true);
             }
 
             return new DeliveryResult(
@@ -448,7 +448,13 @@ final class OnDemandDelivery
             );
         }
 
-        return new DeliveryResult(error: 'target_pending', refreshRequired: true);
+        // Republish is not permission to reveal pre-withdrawal legacy content.
+        // Keep the absence authoritative until a safe replacement is prepared.
+        return new DeliveryResult(
+            httpStatus: $record['target']['withdrawalRevision'] > 0 ? 404 : null,
+            error: 'target_pending',
+            refreshRequired: true,
+        );
     }
 
     /** @param array{target:array<string,mixed>}|null $target */
@@ -456,7 +462,9 @@ final class OnDemandDelivery
     {
         return $target === null
             || ($target['target']['action'] === 'update'
-                && ($snapshot->payload['delivery']['content_version'] ?? null) === $target['target']['contentVersion'])
+                && ($snapshot->payload['delivery']['content_version'] ?? null) === $target['target']['contentVersion']
+                && ($target['target']['withdrawalRevision'] === 0
+                    || ($snapshot->payload['delivery']['publication']['revision'] ?? 0) > $target['target']['withdrawalRevision']))
             || ($target['target']['action'] === 'withdraw'
                 && ($snapshot->payload['status'] ?? null) === 'not_found'
                 && DeliveryTargetState::normalize($snapshot->payload['delivery']['publication'] ?? []) === $target['target']);
@@ -512,6 +520,11 @@ final class OnDemandDelivery
                 unset($state['refresh_requested']);
                 if (! $this->putState($resource, $identifier, $state)) {
                     return 'cache_unavailable';
+                }
+                if (! $missing && $this->worklist !== null
+                    && ! $this->worklist->completePrepared($resource, $identifier)
+                ) {
+                    return 'worklist_unavailable';
                 }
                 $this->writeControl($resource, denied: false, status: null, circuitUntil: 0);
 
