@@ -9,6 +9,8 @@ use Illuminate\Contracts\Config\Repository as ConfigRepository;
 use Illuminate\Http\Request;
 use Smking\Laravel\AeoClient;
 use Smking\Laravel\Data\AeoResponse;
+use Smking\Laravel\Data\CmsPage;
+use Smking\Laravel\Support\SocialMeta;
 use Smking\Laravel\Support\PathNormalizer;
 use Symfony\Component\HttpFoundation\Response;
 
@@ -38,6 +40,58 @@ class InjectAeo
 
     public function handle(Request $request, Closure $next): Response
     {
+        $response = $this->handleAeo($request, $next);
+        $cms = $request->attributes->get('smking.cms.page');
+        if (! $cms instanceof CmsPage || ! $cms->isRenderable() || ! $this->shouldInject($request, $response)
+            || $request->method() !== 'GET' || $this->wantsOriginBypass($request)
+            || (string) $response->headers->get('Content-Encoding', '') !== '') {
+            return $response;
+        }
+        $html = $response->getContent();
+        if (! is_string($html) || ! $this->isFullHtmlDocument($html)) {
+            return $response;
+        }
+        if (! preg_match('/<head\b[^>]*>.*?<\/head\s*>/is', $html, $headMatch, PREG_OFFSET_CAPTURE)) {
+            return $response;
+        }
+        $head = $headMatch[0][0];
+        // CMS metadata remains authoritative even without generated AEO.
+        $seo = $cms->seo ?? [];
+        $seo['title'] ??= $cms->title;
+        $seo['canonicalUrl'] ??= $request->url();
+        // Objects serialized by older SDKs have uninitialized new readonly fields.
+        $contentType = $cms->contentType ?? null;
+        $type = $contentType === null ? null : ($contentType === 'article' ? 'article' : 'website');
+        $seo = SocialMeta::enrich($seo, $html, $cms->jsonLd ?? null, $type);
+        if ($contentType === 'article' && $cms->publishedAt !== null) {
+            $seo['articlePublishedTime'] = $cms->publishedAt;
+        }
+        $flags = (array) $this->config->get('smking.inject', []);
+        $fragments = [];
+        if (($flags['seo_title'] ?? true) && ! empty($seo['title'])) {
+            $head = $this->stripTitle($head);
+            $fragments[] = '<title data-smking="cms-seo">'.e($seo['title']).'</title>';
+        }
+        if (($flags['meta_description'] ?? true) && ! empty($seo['metaDescription'])) {
+            $head = $this->stripVoidTag($head, 'meta', 'name', 'description');
+            $fragments[] = '<meta name="description" content="'.e($seo['metaDescription']).'" data-smking="cms-seo">';
+        }
+        if (($flags['canonical'] ?? true) && ! empty($seo['canonicalUrl'])) {
+            $head = $this->stripVoidTag($head, 'link', 'rel', 'canonical');
+            $fragments[] = '<link rel="canonical" href="'.e($seo['canonicalUrl']).'" data-smking="cms-seo">';
+        }
+        $head = $this->injectSocialTags($head, $seo, $seo['metaDescription'] ?? null, $fragments);
+        $html = substr_replace($html, $head, $headMatch[0][1], strlen($headMatch[0][0]));
+        $response->setContent($html);
+        if ($response->headers->has('Content-Length')) {
+            $response->headers->set('Content-Length', (string) strlen($html));
+        }
+
+        return $response;
+    }
+
+    private function handleAeo(Request $request, Closure $next): Response
+    {
         $response = $next($request);
 
         // v0.13.0: middleware no longer takes over /sitemap.xml /robots.txt
@@ -60,7 +114,7 @@ class InjectAeo
             return $response;
         }
 
-        // auto_inject=false: emit verification headers but never touch HTML.
+        // auto_inject=false: skip AEO rewriting. Resolved CMS metadata is separate.
         // The middleware still registers in v0.2.0 so doctor + curl -I work
         // even when injection is disabled.
         if (! (bool) $this->config->get('smking.auto_inject', true)) {
@@ -152,6 +206,25 @@ class InjectAeo
         }
 
         return $response;
+    }
+
+    private function injectSocialTags(string $html, array $seo, ?string $description, array $fragments = []): string
+    {
+        $flags = (array) $this->config->get('smking.inject', []);
+        if (($flags['og_image'] ?? true) && ! empty($seo['ogImageUrl'])) {
+            foreach (['og:image:width', 'og:image:height', 'og:image:type', 'og:image:alt', 'og:image:secure_url'] as $name) {
+                $html = $this->stripVoidTag($html, 'meta', 'property', $name);
+            }
+        }
+        foreach (SocialMeta::tags($seo, $description) as $tag) {
+            if (! ($flags[$tag['flag']] ?? true)) {
+                continue;
+            }
+            $html = $this->stripVoidTag($html, 'meta', $tag['attribute'], $tag['name']);
+            $fragments[] = '<meta '.$tag['attribute'].'="'.$tag['name'].'" content="'.e($tag['content']).'" data-smking="cms-seo">';
+        }
+
+        return preg_replace_callback('/<\/head\s*>/i', static fn (): string => implode("\n", $fragments)."\n</head>", $html, 1) ?? $html;
     }
 
     private function shouldInject(Request $request, Response $response): bool
@@ -249,6 +322,7 @@ class InjectAeo
         $flags = (array) $this->config->get('smking.inject', []);
 
         $headFragments = [];
+        $socialSeo = $aeo->seo !== null ? SocialMeta::enrich($aeo->seo->toArray(), $html, $aeo->jsonLd) : null;
 
         if (($flags['json_ld'] ?? true) && $aeo->jsonLd !== null) {
             $json = json_encode($aeo->jsonLd, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -275,19 +349,17 @@ class InjectAeo
                 $headFragments[] = '<title data-smking="seo">'.e($aeo->seo->title).'</title>';
             }
 
-            if (($flags['og_title'] ?? true) && $aeo->seo->ogTitle !== null) {
-                $html = $this->stripVoidTag($html, 'meta', 'property', 'og:title');
-                $headFragments[] = '<meta property="og:title" content="'.e($aeo->seo->ogTitle).'" data-smking="seo">';
-            }
-
-            if (($flags['og_description'] ?? true) && $aeo->seo->ogDescription !== null) {
-                $html = $this->stripVoidTag($html, 'meta', 'property', 'og:description');
-                $headFragments[] = '<meta property="og:description" content="'.e($aeo->seo->ogDescription).'" data-smking="seo">';
-            }
-
             if (($flags['og_image'] ?? true) && $aeo->seo->ogImageUrl !== null) {
-                $html = $this->stripVoidTag($html, 'meta', 'property', 'og:image');
-                $headFragments[] = '<meta property="og:image" content="'.e($aeo->seo->ogImageUrl).'" data-smking="seo">';
+                foreach (['og:image:width', 'og:image:height', 'og:image:type', 'og:image:alt', 'og:image:secure_url'] as $name) {
+                    $html = $this->stripVoidTag($html, 'meta', 'property', $name);
+                }
+            }
+            foreach (SocialMeta::tags($socialSeo ?? [], $aeo->metaDescription) as $tag) {
+                if (! ($flags[$tag['flag']] ?? true)) {
+                    continue;
+                }
+                $html = $this->stripVoidTag($html, 'meta', $tag['attribute'], $tag['name']);
+                $headFragments[] = '<meta '.$tag['attribute'].'="'.$tag['name'].'" content="'.e($tag['content']).'" data-smking="seo">';
             }
 
             if (($flags['canonical'] ?? true) && $aeo->seo->canonicalUrl !== null) {
@@ -485,7 +557,7 @@ class InjectAeo
         string $attrName,
         string $attrValue,
     ): string {
-        $tagPattern = '/<'.preg_quote($tagName, '/').'\b[^>]*>/i';
+        $tagPattern = '/(?:<script\b[^>]*>.*?<\/script>|<!--.*?-->)(*SKIP)(*F)|<'.preg_quote($tagName, '/').'\b[^>]*>/is';
         $attrPattern = '/\b'
             .preg_quote($attrName, '/')
             .'\s*=\s*["\']'
@@ -493,23 +565,29 @@ class InjectAeo
             .'["\']/i';
 
         $result = preg_replace_callback(
-            $tagPattern,
-            static fn (array $match): string => preg_match($attrPattern, $match[0]) === 1 ? '' : $match[0],
-            $html,
+            '/<head\b[^>]*>.*?<\/head\s*>/is',
+            static fn (array $head): string => preg_replace_callback(
+                $tagPattern,
+                static fn (array $match): string => preg_match($attrPattern, $match[0]) === 1 ? '' : $match[0],
+                $head[0],
+            ) ?? $head[0],
+            $html, 1,
         );
 
         return $result ?? $html;
     }
 
     /**
-     * Strip the first <title>...</title> from the document. Title has no
-     * identifying attribute (one per document by spec), so we remove the
-     * existing one before injecting smking's. Limit 1 to avoid eating
-     * stray <title> inside <noscript> / <template> on malformed pages.
+     * Strip real head titles before injecting the current title. Preserve
+     * comments, script examples, and body titles such as SVG accessibility text.
      */
     private function stripTitle(string $html): string
     {
-        $result = preg_replace('/<title\b[^>]*>.*?<\/title>/is', '', $html, 1);
+        $result = preg_replace_callback(
+            '/<head\b[^>]*>.*?<\/head\s*>/is',
+            static fn (array $head): string => preg_replace('/(?:<script\b[^>]*>.*?<\/script>|<!--.*?-->)(*SKIP)(*F)|<title\b[^>]*>.*?<\/title>/is', '', $head[0]) ?? $head[0],
+            $html, 1,
+        );
 
         return $result ?? $html;
     }

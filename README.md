@@ -4,19 +4,19 @@ AI-native SEO (AEO) for Laravel. Auto-inject JSON-LD, FAQ, and AI summaries into
 
 ## Install
 
-**Don't follow this README to install.** Your smking dashboard generates a per-site install prompt with the real `SMKING_API_KEY`, `SMKING_BASE_URL`, and (if you use CMS) `SMKING_WEBHOOK_SECRET` baked in, plus the exact `composer require`, `vendor:publish`, and `php artisan smking:doctor` commands. The prompt is the source of truth and stays in sync with the SDK version.
-
-Two ways to get it:
+Follow the [public installation and migration guide](https://getpagezero.com/docs/sdk/laravel.md),
+the installation source shared by Dashboard and CLI. Use your own coding assistant.
+CLI 0.10+ handles OAuth/site connection and confirmed local settings only;
+it does not install packages, activate on-demand mode or configure host scheduling.
 
 ```bash
-# Option 1 — one-shot wizard (composer require + .env + doctor)
-npx @soloworks/smking-wizard
-
-# Option 2 — copy the prompt manually from your smking dashboard's
-# install panel into your editor / coding agent.
+pnpm dlx @soloworks/smking-wizard@latest connect
+pnpm dlx @soloworks/smking-wizard@latest instructions --framework=laravel
 ```
 
-Once `php artisan smking:doctor` is green, the middleware auto-registers and every HTML GET response picks up:
+The middleware auto-registers. Doctor is a diagnostic check, not delivery
+activation: on-demand mode also requires verified local content, host background
+work and source readiness. Depending on selected settings, HTML responses can provide:
 
 - **AEO** — JSON-LD, FAQ/summary blocks (for ChatGPT, Perplexity, Google AI)
 - **SEO** — `<title>`, `og:*`, `twitter:*`, `<link rel="canonical">` (for Google snippet + social shares)
@@ -78,7 +78,7 @@ Add `<x-smking-runtime />` once in your root Blade layout `<head>` — it emits 
 
 Optional `:base-url="..."` attribute overrides `config('smking.base_url')`. Trailing slash is trimmed.
 
-Without `<x-smking-runtime />`, `<x-smking-cms>` content still renders but the Tailwind utility classes from the dashboard's cva variants resolve to dead strings — the page reaches the browser unstyled. The wizard installer auto-adds this mount; if you're upgrading manually from < v0.17.1, add the one line above.
+Without `<x-smking-runtime />`, `<x-smking-cms>` content still renders but the Tailwind utility classes from the dashboard's cva variants resolve to dead strings. Follow the public guide to add this mount; the connection CLI does not edit layouts.
 
 ## CMS rendering (optional, v0.11.0+)
 
@@ -98,6 +98,8 @@ Route::get('/blog/{path?}', [\Smking\Laravel\Http\Controllers\CmsPageController:
 ```
 
 The optional catch-all handles the mount root, flat slugs, and nested slugs. Passing the controller's preloaded `$cms` object to `<x-smking-cms>` avoids a second public CMS request.
+
+SDK 0.23.2+ also writes the resolved `$cms->seo` into the host `<head>`, independently of AEO generation. Keep `SMKING_CMS_PATH` aligned with the actual route prefix. Existing component and `smking::cms` includes work without a new mount: the middleware normalizes matching tags, preserves manual CMS fields, synchronizes Twitter with Open Graph, and reuses available HTML/JSON-LD facts. It adds no image downloads or source requests, and does not invent missing image dimensions or social accounts. See the [shared Laravel guide](https://getpagezero.com/docs/sdk/laravel.md#render-cms-metadata-in-the-host-layout). Deploy the SDK before rebuilding Blade view caches.
 
 ### Cache invalidation
 

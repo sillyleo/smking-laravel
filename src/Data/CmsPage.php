@@ -54,6 +54,8 @@ final class CmsPage
         public readonly ?array $blocks = null,
         public readonly ?string $publishedAt = null,
         public readonly ?array $seo = null,
+        public readonly ?string $contentType = null,
+        public readonly ?array $jsonLd = null,
     ) {
     }
 
@@ -103,6 +105,8 @@ final class CmsPage
                 ? $page['publishedAt']
                 : null,
             seo: $seo,
+            contentType: is_string($page['contentType'] ?? null) ? $page['contentType'] : null,
+            jsonLd: is_array($page['jsonLd'] ?? null) ? $page['jsonLd'] : null,
         );
     }
 
